@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "fittrack-app",
+    "slug": "fittrack-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "package": "com.praneshpk16.fittrackapp"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "eb684470-9e6e-4ebd-9bd8-30fdc1746366"
+      }
+    },
+    "plugins": [
+      "expo-status-bar",
+      "@react-native-community/datetimepicker",
+      "expo-sharing"
+    ]
+  }
+}
