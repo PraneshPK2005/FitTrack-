@@ -48,6 +48,75 @@ export function showToast(message, type = 'info', duration = DEFAULT_TOAST_DURAT
 }
 
 // ---------------------------------------------------------------------------
+// User-created notification rules (Change 6)
+// ---------------------------------------------------------------------------
+// A rule is a small declarative object -- never arbitrary code -- so it can
+// be safely persisted/evaluated:
+//   { id, metric, operator, threshold, hour, minute, enabled }
+// metric:    one of CUSTOM_RULE_METRICS[].key below
+// operator:  'lt' | 'gt'  (</>).  Only these two are exposed since every
+//            supported metric is meaningfully expressed as "below X" or
+//            "above/exceeds X" -- keeps the rule surface small and every
+//            combination valid, rather than allowing operators (e.g. '==')
+//            that would be unreliable against real-world tracked numbers.
+// threshold: number
+// Only fields that can be reliably evaluated from data this app already
+// tracks are exposed -- nothing here can reach outside that.
+export const CUSTOM_RULE_METRICS = [
+  { key: 'fibre',      label: 'Fibre (g)',              unit: 'g'   },
+  { key: 'fats',       label: 'Fats (g)',                unit: 'g'   },
+  { key: 'protein',    label: 'Protein (g)',             unit: 'g'   },
+  { key: 'carbs',      label: 'Carbs (g)',               unit: 'g'   },
+  { key: 'calories',   label: 'Calories (kcal)',         unit: 'kcal'},
+  { key: 'water',      label: 'Water (ml)',              unit: 'ml'  },
+  { key: 'sleepHours', label: 'Sleep last night (hrs)',  unit: 'hrs' },
+  { key: 'workoutsThisWeek', label: 'Workouts this week', unit: ''   },
+  { key: 'weight',     label: 'Current weight (kg)',     unit: 'kg'  },
+  { key: 'recoveryScore', label: 'Recovery score',       unit: ''    },
+];
+
+export const CUSTOM_RULE_OPERATORS = [
+  { key: 'lt', label: 'is below' },
+  { key: 'gt', label: 'exceeds'  },
+];
+
+// Every field this reads is a plain number the caller computed from
+// already-tracked data (today's nutrition totals, today's sleep, this
+// week's workout count, current weight, today's recovery score) -- never
+// evaluated code, so a rule can only ever compare one of these numbers to
+// a threshold.
+export function evaluateCustomRule(rule, ctx = {}) {
+  if (!rule?.enabled) return false;
+  const value = Number(ctx[rule.metric]);
+  if (!Number.isFinite(value)) return false; // no data for this metric yet -- never fabricate a "met"/"unmet" result
+  const threshold = Number(rule.threshold);
+  if (!Number.isFinite(threshold)) return false;
+  return rule.operator === 'gt' ? value > threshold : value < threshold;
+}
+
+// Validates a rule's shape before it's ever saved/scheduled -- rejects
+// anything structurally invalid so a bad rule can't silently no-op forever
+// or crash the scheduler.
+export function validateCustomRule(rule) {
+  if (!rule) return { valid: false, error: 'Rule is required.' };
+  if (!CUSTOM_RULE_METRICS.some(m => m.key === rule.metric)) return { valid: false, error: 'Choose a valid metric.' };
+  if (!CUSTOM_RULE_OPERATORS.some(o => o.key === rule.operator)) return { valid: false, error: 'Choose a valid condition.' };
+  if (!Number.isFinite(Number(rule.threshold))) return { valid: false, error: 'Enter a numeric threshold.' };
+  const hour = Number(rule.hour), minute = Number(rule.minute);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return { valid: false, error: 'Choose a valid hour (0-23).' };
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return { valid: false, error: 'Choose a valid minute (0-59).' };
+  return { valid: true, error: null };
+}
+
+function customRuleBody(rule, value) {
+  const metric = CUSTOM_RULE_METRICS.find(m => m.key === rule.metric);
+  const label = metric?.label || rule.metric;
+  const cmp = rule.operator === 'gt' ? 'exceeded' : 'is below';
+  const unit = metric?.unit ? ` ${metric.unit}` : '';
+  return `${label} ${cmp} your threshold of ${rule.threshold}${unit} (currently ${Math.round(value * 10) / 10}${unit}).`;
+}
+
+// ---------------------------------------------------------------------------
 // NotificationService
 // ---------------------------------------------------------------------------
 export function getDefaultNotificationSettings() {
@@ -62,6 +131,11 @@ export function getDefaultNotificationSettings() {
     // the user's choice; this is just a reminder, never enforced.
     photos: { enabled: true, hour: 10, minute: 0, type: 'push' },
     quietHours: { enabled: true, start: '22:30', end: '07:00' },
+    // User-created rules (Change 6) -- see evaluateCustomRule/validateCustomRule
+    // above. Old saved settings simply won't have this key; the
+    // {...getDefaultNotificationSettings(), ...saved} merge pattern already
+    // used everywhere this is loaded fills it in as [] automatically.
+    customRules: [],
   };
 }
 
@@ -120,6 +194,19 @@ export const NotificationService = {
 
     const { status } = await Notifications.requestPermissionsAsync();
     return status === 'granted';
+  },
+
+  /**
+   * Cancels a single user-created rule's scheduled notification by its rule
+   * id. Needed because the main scheduling loop only ever iterates whatever
+   * is currently in settings.customRules -- once a rule is removed from
+   * that list it would never be visited again to get cancelled, so a
+   * deleted rule could otherwise keep firing on its old schedule forever.
+   */
+  async cancelCustomRule(ruleId) {
+    const Notifications = await getNotifModule();
+    if (!Notifications) return;
+    try { await Notifications.cancelScheduledNotificationAsync(`custom_rule_${ruleId}`); } catch {}
   },
 
   /**
@@ -230,6 +317,11 @@ export const NotificationService = {
    */
   async checkAndScheduleReminders({
     profile = {}, hasTodayFood, hasTodaySleep, hasTodayWorkout, todayCalories, todayProtein,
+    // Extra context for user-created rules (Change 6) -- all optional, all
+    // default to "no data" (undefined) rather than 0, so a rule about e.g.
+    // fibre never fires as a false "0 < threshold" just because the field
+    // wasn't passed in from an older call site.
+    todayCarbs, todayFats, todayFibre, todayWater, todaySleepHours, workoutsThisWeek, currentWeight, recoveryScore,
   }) {
     const defaults = getDefaultNotificationSettings();
     let settings = defaults;
@@ -238,10 +330,16 @@ export const NotificationService = {
       const raw = await storage.default.getItem('fittrack_notification_settings');
       if (raw) settings = { ...defaults, ...JSON.parse(raw) };
     } catch {}
-    return this.scheduleConfiguredReminders({ settings, profile, hasTodayFood, hasTodaySleep, hasTodayWorkout, todayCalories, todayProtein });
+    return this.scheduleConfiguredReminders({
+      settings, profile, hasTodayFood, hasTodaySleep, hasTodayWorkout, todayCalories, todayProtein,
+      todayCarbs, todayFats, todayFibre, todayWater, todaySleepHours, workoutsThisWeek, currentWeight, recoveryScore,
+    });
   },
 
-  async scheduleConfiguredReminders({ settings, profile = {}, hasTodayFood, hasTodaySleep, hasTodayWorkout, todayCalories = 0, todayProtein = 0, force = false }) {
+  async scheduleConfiguredReminders({
+    settings, profile = {}, hasTodayFood, hasTodaySleep, hasTodayWorkout, todayCalories = 0, todayProtein = 0, force = false,
+    todayCarbs, todayFats, todayFibre, todayWater, todaySleepHours, workoutsThisWeek, currentWeight, recoveryScore,
+  }) {
     const Notifications = await getNotifModule();
     if (!Notifications) return;
     const granted = settings.enabled ? await this.requestPermission() : false;
@@ -253,6 +351,8 @@ export const NotificationService = {
       hasTodayFood: !!hasTodayFood, hasTodaySleep: !!hasTodaySleep, hasTodayWorkout: !!hasTodayWorkout,
       calorieTarget: profile.calorieTarget ?? 2300, proteinTarget: profile.proteinTarget ?? 140,
       todayCalories: Math.round(Number(todayCalories) || 0), todayProtein: Math.round(Number(todayProtein) || 0),
+      customRules: settings.customRules || [],
+      ctx: [todayCarbs, todayFats, todayFibre, todayWater, todaySleepHours, workoutsThisWeek, currentWeight, recoveryScore].map(v => Number.isFinite(Number(v)) ? Math.round(Number(v) * 10) / 10 : null),
     });
 
     // Avoid needless OS rescheduling on every app start. If the saved signature
@@ -305,7 +405,33 @@ export const NotificationService = {
     const ph = settings.photos;
     if (granted && ph?.enabled && !inQuiet(ph.hour, ph.minute)) await this.scheduleWeekly({ id:'progress_photos_weekly', title:'📸 Weekly Progress Photos', body:"Sunday check-in: snap any of your 7 progress photo angles you'd like to update. Totally optional!", weekday:1, hour:ph.hour, minute:ph.minute });
     else { try { await Notifications.cancelScheduledNotificationAsync('progress_photos_weekly'); } catch {} }
-    if (!settings.enabled) { for (const id of ['sleep_morning','nutrition_noon','workout_evening','calorie_deficit','protein_deficit','progress_photos_weekly']) { try { await Notifications.cancelScheduledNotificationAsync(id); } catch {} } }
+
+    // ── User-created custom rules (Change 6) ──────────────────────────────
+    // Reuses this exact same scheduleDaily/cancel infrastructure -- each
+    // rule just gets its own stable identifier so it can be independently
+    // scheduled/cancelled without touching any other reminder.
+    const ctx = {
+      carbs: todayCarbs, fats: todayFats, fibre: todayFibre, water: todayWater,
+      sleepHours: todaySleepHours, workoutsThisWeek, weight: currentWeight, recoveryScore,
+    };
+    const customRules = Array.isArray(settings.customRules) ? settings.customRules : [];
+    for (const rule of customRules) {
+      const id = `custom_rule_${rule.id}`;
+      const check = validateCustomRule(rule);
+      const value = Number(ctx[rule.metric]);
+      const met = check.valid && rule.enabled && evaluateCustomRule(rule, ctx);
+      if (granted && met && !inQuiet(Number(rule.hour) || 0, Number(rule.minute) || 0)) {
+        await this.scheduleDaily({ id, title: '🔔 FitTrack Reminder', body: customRuleBody(rule, value), hour: Number(rule.hour) || 0, minute: Number(rule.minute) || 0 });
+      } else {
+        try { await Notifications.cancelScheduledNotificationAsync(id); } catch {}
+      }
+    }
+
+    if (!settings.enabled) {
+      const fixedIds = ['sleep_morning','nutrition_noon','workout_evening','calorie_deficit','protein_deficit','progress_photos_weekly'];
+      const customIds = customRules.map(r => `custom_rule_${r.id}`);
+      for (const id of [...fixedIds, ...customIds]) { try { await Notifications.cancelScheduledNotificationAsync(id); } catch {} }
+    }
     try {
       const storage = await import('./storage');
       await storage.default.setItem('fittrack_notification_schedule_signature', signature);

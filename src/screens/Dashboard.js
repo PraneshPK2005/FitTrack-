@@ -680,7 +680,10 @@ function ProgressPhotosCard({ photos=[], onAdd, onDelete, photoPinHash, onSetPho
   // place. Reuses the same openLock/password flow as requireUnlock, just
   // without its "skip if already unlocked" shortcut.
   const requireReauth = (action) => {
-    openLock(photoPinHash ? 'unlock' : 'setup', action);
+    // Uses its own stage ('delete-reauth') rather than 'unlock' purely so the
+    // modal can show deletion-specific wording below -- submitLock still
+    // verifies the password with the exact same branch/logic as 'unlock'.
+    openLock(photoPinHash ? 'delete-reauth' : 'setup', action);
   };
 
   const closeLock = () => {
@@ -691,7 +694,11 @@ function ProgressPhotosCard({ photos=[], onAdd, onDelete, photoPinHash, onSetPho
 
   const submitLock = async () => {
     const val = pinValue.trim();
-    if (lockStage === 'unlock') {
+    if (lockStage === 'unlock' || lockStage === 'delete-reauth') {
+      // Identical verification/side-effects to the original 'unlock'
+      // branch -- 'delete-reauth' is purely a second stage tag so the modal
+      // text below can differ for category deletion; nothing about the
+      // password check or unlock behavior itself changes.
       if (!val) { setLockError('Enter your password.'); return; }
       if (hashPin(val) !== photoPinHash) { setLockError('Incorrect password. Try again.'); setPinValue(''); return; }
       setUnlocked(true);
@@ -806,6 +813,7 @@ function ProgressPhotosCard({ photos=[], onAdd, onDelete, photoPinHash, onSetPho
 
   const lockTitle = {
     unlock: 'Enter Password',
+    'delete-reauth': '🔒 Confirm Category Deletion',
     setup: 'Protect Your Photos',
     'setup-confirm': 'Confirm Password',
     'change-current': 'Enter Current Password',
@@ -814,6 +822,7 @@ function ProgressPhotosCard({ photos=[], onAdd, onDelete, photoPinHash, onSetPho
   }[lockStage];
   const lockSubtitle = {
     unlock: 'Enter your password to upload or view progress photos.',
+    'delete-reauth': 'Enter your password to permanently delete this progress-photo category and all of its photos.',
     setup: 'Set a password so only you can upload or view your progress photos. Use at least 4 characters.',
     'setup-confirm': 'Re-enter the password to confirm.',
     'change-current': 'Enter your current password to continue.',
@@ -821,6 +830,7 @@ function ProgressPhotosCard({ photos=[], onAdd, onDelete, photoPinHash, onSetPho
     'change-confirm': 'Re-enter the new password to confirm.',
   }[lockStage];
   const lockButtonLabel = lockStage === 'unlock' ? 'Unlock'
+    : lockStage === 'delete-reauth' ? 'Delete'
     : lockStage.endsWith('confirm') ? 'Confirm'
     : 'Continue';
 

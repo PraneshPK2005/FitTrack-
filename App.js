@@ -17,7 +17,7 @@ import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 // height in dp on Android; it's undefined/unused on iOS, where the
 // SafeAreaView below already handles the notch/inset natively.
 const ANDROID_STATUS_BAR_HEIGHT = Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 0;
-import { database, getFormattedDate } from './src/utils/database';
+import { database, getFormattedDate, getDateNDaysAgo } from './src/utils/database';
 import { registerToastHandler, NotificationService, DEFAULT_TOAST_DURATION } from './src/utils/notifications';
 import DashboardScreen from './src/screens/Dashboard';
 import NutritionScreen from './src/screens/Nutrition';
@@ -201,19 +201,30 @@ export default function App() {
     guard.lastRunAt = now;
     try {
       const today = getFormattedDate(new Date());
-      const [allFood, allSleep, allWorkout, p] = await Promise.all([
+      const [allFood, allSleep, allWorkout, p, allWater] = await Promise.all([
         database.getFoodLogs(),
         database.getSleepLogs(),
         database.getWorkoutLogs(),
         database.getProfile(),
+        database.getWaterLogs(),
       ]);
 
       const todayFood    = allFood.filter(f    => f.date && f.date.slice(0, 10) === today);
       const todaySleep   = allSleep.filter(s   => s.date && s.date.slice(0, 10) === today && (s.sleepType === 'night' || !s.sleepType));
       const todayWorkout = allWorkout.filter(w => w.date && w.date.slice(0, 10) === today);
+      const todayWaterLogs = allWater.filter(w => w.date && w.date.slice(0, 10) === today);
 
       const totalCal  = todayFood.reduce((a, f) => a + (Number(f.calories) || 0), 0);
       const totalProt = todayFood.reduce((a, f) => a + (Number(f.protein)  || 0), 0);
+      // Extra totals used only by user-created custom rules (Change 6) --
+      // computed from data already fetched above, no new reads needed.
+      const totalCarbs = todayFood.reduce((a, f) => a + (Number(f.carbs) || 0), 0);
+      const totalFats  = todayFood.reduce((a, f) => a + (Number(f.fats)  || 0), 0);
+      const totalFibre = todayFood.reduce((a, f) => a + (Number(f.fibre) || 0), 0);
+      const totalWater = todayWaterLogs.reduce((a, w) => a + (Number(w.amountMl) || 0), 0);
+      const todaySleepHours = todaySleep.reduce((a, s) => a + (Number(s.duration) || 0), 0);
+      const weekAgo = getDateNDaysAgo(6);
+      const workoutsThisWeek = new Set(allWorkout.filter(w => String(w.date).slice(0,10) >= weekAgo).map(w => String(w.date).slice(0,10))).size;
 
       // ── New Day Modal: show if first open today ──
       const lastOpenKey = 'lastOpenDate';
@@ -254,6 +265,21 @@ export default function App() {
         hasTodayWorkout: todayWorkout.length > 0,
         todayCalories:   totalCal,
         todayProtein:    totalProt,
+        // Change 6: extra context so user-created rules (fibre/fats/carbs/
+        // water/sleep/workout-frequency/weight/recovery) can be evaluated.
+        // Recovery score is deliberately best-effort/optional here (only
+        // read if already stored for today -- never recalculated as a side
+        // effect of scheduling notifications) so a rule referencing it
+        // simply won't fire until Dashboard has computed today's score at
+        // least once, rather than this triggering its own calculation.
+        todayCarbs: totalCarbs,
+        todayFats: totalFats,
+        todayFibre: totalFibre,
+        todayWater: totalWater,
+        todaySleepHours,
+        workoutsThisWeek,
+        currentWeight: p?.currentWeight ?? p?.weight,
+        recoveryScore: (await database.getRecoveryScoreForDate(today).catch(() => null))?.score,
       });
     } catch (e) {
       // Notification setup errors are non-fatal; app continues normally
@@ -355,6 +381,7 @@ export default function App() {
 
   // ── Custom food handlers ───────────────────────────────────
   const handleAddCustomF    = async (f)           => { await database.addCustomFood(f);              await refresh(); };
+  const handleUpdateCustomF = async (id, fields)   => { await database.updateCustomFood(id, fields);  await refresh(); };
   const handleDelCustomF    = async (id)           => { await database.deleteCustomFood(id);         await refresh(); };
 
   // ── Water handlers ─────────────────────────────────────────
@@ -610,6 +637,7 @@ export default function App() {
         onUpdateProfile={handleUpdateProfile}
         customFoods={customFoods}
         onAddCustomFood={handleAddCustomF}
+        onUpdateCustomFood={handleUpdateCustomF}
         onDeleteCustomFood={handleDelCustomF}
         onClearAllData={handleClearAll}
         onExportData={handleExportData}

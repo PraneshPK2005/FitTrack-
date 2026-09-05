@@ -215,14 +215,21 @@ function ExercisePanel({
   customExercises = [], draftKey = null, onClearDraft, onPersistDraft, onRemoveCustomExercise,
 }) {
   const [exerciseName,    setExerciseName]    = useState(initialDraft?.exerciseName || '');
+  // Optional free-text equipment/machine tag (e.g. "Cable Machine" vs "Back
+  // Machine" for the same "Row" exercise). Kept as a plain string on the
+  // log itself rather than a second parallel exercise-library system --
+  // this is the minimal extension the existing architecture needs so two
+  // machines doing the same named exercise can be told apart in history
+  // and PR comparisons without duplicating the exercise entry itself.
+  const [equipment,       setEquipment]       = useState(initialDraft?.equipment || '');
   const allowDuration = muscle === 'Core';
   const [exerciseType,    setExerciseType]    = useState(allowDuration ? (initialDraft?.exerciseType || (initialDraft?.isPlank ? 'duration' : 'reps')) : 'reps');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [sets,            setSets]            = useState(initialDraft?.sets?.length ? initialDraft.sets.map(s => ({ ...s, durationSeconds: s?.durationSeconds !== undefined && s?.durationSeconds !== '' ? formatDurationClock(s.durationSeconds) : '' })) : [{ reps: '', durationSeconds: '', weight: '', dropSet: false, drops: [] }]);
   const [loggedMessage,   setLoggedMessage]   = useState(false);
   const selectingSuggestion = useRef(false);
-  const latestDraftRef = useRef({ exerciseName, exerciseType, sets });
-  latestDraftRef.current = { exerciseName, exerciseType, sets };
+  const latestDraftRef = useRef({ exerciseName, exerciseType, sets, equipment });
+  latestDraftRef.current = { exerciseName, exerciseType, sets, equipment };
 
   const onDraftChangeRef = useRef(onDraftChange);
   useEffect(() => { onDraftChangeRef.current = onDraftChange; }, [onDraftChange]);
@@ -233,10 +240,11 @@ function ExercisePanel({
       exerciseName,
       exerciseType: allowDuration ? exerciseType : 'reps',
       muscleGroup: muscle,
+      equipment: equipment.trim(),
       isPlank: allowDuration && exerciseType === 'duration',
       sets: sets.map(s => ({ reps: exerciseType === 'reps' ? s.reps : '', durationSeconds: exerciseType === 'duration' ? parseDurationClock(s.durationSeconds ?? s.reps ?? '') : '', weight: s.weight, dropSet: !!s.dropSet, drops: s.drops || [] })),
     });
-  }, [exerciseName, exerciseType, muscle, sets, allowDuration]);
+  }, [exerciseName, exerciseType, muscle, sets, allowDuration, equipment]);
 
   // Flush the latest in-memory form state when this panel is unmounted.
   // The Workout screen can be unmounted when navigating to another app page;
@@ -249,6 +257,7 @@ function ExercisePanel({
         exerciseName: latest.exerciseName,
         exerciseType: allowDuration ? latest.exerciseType : 'reps',
         muscleGroup: muscle,
+        equipment: (latest.equipment || '').trim(),
         isPlank: allowDuration && latest.exerciseType === 'duration',
         sessionId,
         sessionName: sessionName || '',
@@ -303,6 +312,7 @@ function ExercisePanel({
     exerciseName: exerciseName.trim(),
     exerciseType: allowDuration ? exerciseType : 'reps',
     muscleGroup: muscle,
+    equipment: equipment.trim(),
     isPlank: allowDuration && exerciseType === 'duration',
     sessionId: sessionId || null,
     sessionName: sessionName || '',
@@ -333,6 +343,7 @@ function ExercisePanel({
     onClearDraft && onClearDraft();
     setLoggedMessage(true);
     setExerciseName('');
+    setEquipment('');
     setExerciseType('reps');
     setSets([{ reps: '', durationSeconds: '', weight: '', dropSet: false, drops: [] }]);
     setShowSuggestions(false);
@@ -416,6 +427,20 @@ function ExercisePanel({
             ))}
           </ScrollView>
         )}
+      </View>
+
+      {/* Optional equipment/machine tag -- lets the same exercise name
+          ("Row") be distinguished by which machine performed it ("Cable
+          Machine" vs "Back Machine") for correct, non-misleading PR history. */}
+      <View style={styles.inputWrapper}>
+        <ClearableTextInput
+          style={styles.equipmentInput}
+          placeholder="Equipment / Machine (optional)"
+          placeholderTextColor={C.muted2}
+          value={equipment}
+          onChangeText={setEquipment}
+          onBlur={() => { if (equipment.trim()) setEquipment(toTitleCase(equipment.trim())); }}
+        />
       </View>
 
       {allowDuration ? (
@@ -553,7 +578,7 @@ function ExercisePanel({
 // Renders the muscle-grouped exercise list for a single set of logs
 // (either one session's logs, or all of a date's logs when there's only
 // one session that day).
-function SupersetLogs({ logs, editingId, setEditingId, onSaveEdit, onDelete, onDeleteSuperset, outerNumber }) {
+function SupersetLogs({ logs, editingId, setEditingId, onSaveEdit, onDelete, onDeleteSuperset, outerNumber, showDate = false }) {
   const ordered = [...logs].sort((a, b) => (Number(a.supersetOrder) || 999) - (Number(b.supersetOrder) || 999));
   const color = C.primary;
   return (
@@ -563,6 +588,7 @@ function SupersetLogs({ logs, editingId, setEditingId, onSaveEdit, onDelete, onD
           <View style={styles.supersetOrderBadge}><Text style={styles.supersetOrderText}>{outerNumber}</Text></View>
         )}
         <Text style={styles.supersetGroupTitle}>🔗 SUPERSET</Text>
+        {showDate && ordered[0]?.date ? <Text style={styles.exHistEntryDate}>{formatDateLabel(String(ordered[0].date).slice(0, 10))}</Text> : null}
         <Text style={styles.supersetGroupCount}>{ordered.length} exercises</Text>
         {onDeleteSuperset && (
           <TouchableOpacity style={styles.supersetDeleteBtn} onPress={() => onDeleteSuperset(ordered)}>
@@ -585,7 +611,10 @@ function SupersetLogs({ logs, editingId, setEditingId, onSaveEdit, onDelete, onD
             ) : (
               <>
                 <View style={styles.historyEntryTop}>
-                  <Text style={[styles.historyExerciseName, { flex: 1, color: muscleColor }]}>{log.exerciseName}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.historyExerciseName, { color: muscleColor }]}>{log.exerciseName}</Text>
+                    {log.equipment ? <View style={[styles.equipmentTag, { alignSelf: 'flex-start', marginTop: 2 }]}><Text style={styles.equipmentTagText}>{log.equipment}</Text></View> : null}
+                  </View>
                   <TouchableOpacity style={styles.editBtn} onPress={() => setEditingId(log.id)}><Text style={styles.editBtnText}>✏️</Text></TouchableOpacity>
                   <TouchableOpacity style={styles.deleteBtn} onPress={() => onDelete(log)}><Text style={styles.deleteBtnText}>🗑️</Text></TouchableOpacity>
                 </View>
@@ -1652,6 +1681,11 @@ function RecordsTab({ workoutLogs }) {
       isSuperset: log.isSuperset === true,
       supersetId: log.supersetId || null,
       exerciseType: log.exerciseType || (log.isPlank ? 'duration' : 'reps'),
+      // Optional machine/equipment tag -- '' means "not specified" and is
+      // its own bucket, kept distinct from any named equipment so old
+      // records without this field keep comparing only against each other,
+      // exactly as before this feature existed.
+      equipment: log.equipment || '',
     });
   });
 
@@ -1793,6 +1827,23 @@ function RecordsTab({ workoutLogs }) {
                     {exNames.map((ex, exIdx) => {
                       const history  = exercises[ex];
                       const normalHistory = history.filter(h => !h.isSuperset);
+                      // PR/PB comparisons are scoped per equipment tag so two
+                      // different machines doing the same named exercise
+                      // (e.g. "Row" on a Cable Machine vs a Back Machine)
+                      // never get mixed into one misleading PB. '' (not
+                      // specified) is its own bucket -- this keeps every
+                      // pre-existing record (which has no equipment field)
+                      // comparing exactly as it did before this feature.
+                      const equipKeys = [...new Set(normalHistory.map(h => h.equipment || ''))];
+                      const pbByEquip = {};
+                      equipKeys.forEach(eq => {
+                        const rows = normalHistory.filter(h => (h.equipment || '') === eq);
+                        const w = Math.max(...rows.map(h => h.bestWeight), 0);
+                        pbByEquip[eq] = { weight: w, entry: rows.find(h => h.bestWeight === w) || null };
+                      });
+                      // Legacy single-banner case: no equipment ever recorded
+                      // for this exercise (or only one machine used) -- show
+                      // exactly the same single PB banner as before.
                       const pbWeight = Math.max(...normalHistory.map(h => h.bestWeight), 0);
                       const pbEntry  = normalHistory.find(h => h.bestWeight === pbWeight);
                       // Reps must come from the SAME session/set that hit
@@ -1819,8 +1870,11 @@ function RecordsTab({ workoutLogs }) {
                           {pbWeight > 0 && pbEntry && (
                             <View style={[styles.exHistPBCard, { borderLeftColor: '#f59e0b' }]}>
                               <View style={styles.exHistPBTopRow}>
-                                <Text style={styles.exHistPBTitle}>🏆 Personal Best</Text>
-                                <Text style={styles.exHistPBDate}>{pbEntry.date}</Text>
+                                <Text style={styles.exHistPBTitle}>🏆 Personal Best{equipKeys.length > 1 ? ' (all equipment)' : ''}</Text>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                  {pbEntry.equipment ? <View style={styles.equipmentTag}><Text style={styles.equipmentTagText}>{pbEntry.equipment}</Text></View> : null}
+                                  <Text style={styles.exHistPBDate}>{pbEntry.date}</Text>
+                                </View>
                               </View>
                               <View style={styles.exHistPBStats}>
                                 <View style={[styles.exHistPBChip, { borderColor: color + '55', backgroundColor: color + '15' }]}>
@@ -1876,12 +1930,13 @@ function RecordsTab({ workoutLogs }) {
                                   (parseFloat(s.weight) || 0) > (parseFloat(best?.weight) || 0) ? s : best,
                                   h.sets[0])
                               : null;
-                            const isPB = h.bestWeight === pbWeight && pbWeight > 0;
+                            const isPB = h.bestWeight === (pbByEquip[h.equipment || '']?.weight ?? pbWeight) && h.bestWeight > 0;
                             return (
                               <View key={hi} style={[styles.exHistSessionRow, isPB && styles.exHistSessionRowPB]}>
                                 <View style={styles.exHistSessionLeft}>
                                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                                     <Text style={styles.exHistSessionDate}>{h.date}</Text>
+                                    {h.equipment ? <View style={styles.equipmentTag}><Text style={styles.equipmentTagText}>{h.equipment}</Text></View> : null}
                                     {h.isSuperset && <Text style={styles.supersetHistoryBadge}>🔗 Superset</Text>}
                                   </View>
                                   {bestSet && (
@@ -1922,6 +1977,7 @@ function RecordsTab({ workoutLogs }) {
 
 function InlineEditForm({ log, onSave, onCancel }) {
   const [exerciseName, setExerciseName] = useState(log.exerciseName || '');
+  const [equipment, setEquipment] = useState(log.equipment || '');
   const allowDuration = log.muscleGroup === 'Core';
   const [exerciseType, setExerciseType] = useState(allowDuration ? (log.exerciseType || (log.isPlank ? 'duration' : 'reps')) : (log.exerciseType === 'duration' ? 'duration' : 'reps'));
   const [sets, setSets] = useState(safeSets(log.sets, log));
@@ -1959,6 +2015,7 @@ function InlineEditForm({ log, onSave, onCancel }) {
     onSave({
       exerciseName: exerciseName.trim(),
       muscleGroup:  log.muscleGroup,
+      equipment:    equipment.trim(),
       exerciseType,
       isPlank: exerciseType === 'duration',
       sets:         sets.map(s => ({ reps: exerciseType === 'reps' ? s.reps : '', durationSeconds: exerciseType === 'duration' ? (s.durationSeconds ?? s.reps ?? '') : '', weight: s.weight, dropSet: !!s.dropSet, drops: s.drops || [] })),
@@ -1974,6 +2031,13 @@ function InlineEditForm({ log, onSave, onCancel }) {
         value={exerciseName}
         onChangeText={setExerciseName}
         placeholder="Exercise name"
+        placeholderTextColor={C.muted2}
+      />
+      <ClearableTextInput
+        style={styles.editExerciseInput}
+        value={equipment}
+        onChangeText={setEquipment}
+        placeholder="Equipment / Machine (optional)"
         placeholderTextColor={C.muted2}
       />
       {allowDuration ? (
@@ -2307,7 +2371,16 @@ function HistoryTab({ workoutLogs, onUpdateWorkoutLog, onDeleteWorkoutLog }) {
   );
 
   // ── Log entry renderer ──
-  const renderLogEntry = (log, color, exerciseOrder) => {
+  // `showDate` is only ever passed true from Exercise-search mode. Date and
+  // Muscle modes already show the date once, as the shared group header
+  // above every block of logs (formatDateLabel(groupKey)) -- so they must
+  // NOT also show it per-entry, or every entry would show it twice. Exercise
+  // mode groups by exercise name instead of by date (a single exercise can
+  // span many different sessions), so there IS no per-date header there;
+  // this adds the same formatDateLabel date+day text directly on each entry
+  // instead, matching Muscle History's presentation without duplicating it
+  // in the modes that already have it.
+  const renderLogEntry = (log, color, exerciseOrder, showDate = false) => {
     const sets      = safeSets(log.sets, log);
     const isEditing = editingId === log.id;
     return (
@@ -2323,7 +2396,13 @@ function HistoryTab({ workoutLogs, onUpdateWorkoutLog, onDeleteWorkoutLog }) {
             <View style={styles.historyEntryTop}>
               <View style={styles.historyExerciseTitleRow}>
                 <View style={styles.historyExerciseOrderBadge}><Text style={styles.historyExerciseOrderText}>{exerciseOrder || '—'}</Text></View>
-                <Text style={[styles.historyExerciseName, { flex: 1 }]} numberOfLines={1}>{log.exerciseName}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.historyExerciseName} numberOfLines={1}>{log.exerciseName}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    {log.equipment ? <View style={styles.equipmentTag}><Text style={styles.equipmentTagText}>{log.equipment}</Text></View> : null}
+                    {showDate && log.date ? <Text style={styles.exHistEntryDate}>{formatDateLabel(String(log.date).slice(0, 10))}</Text> : null}
+                  </View>
+                </View>
               </View>
               <TouchableOpacity style={styles.editBtn} onPress={() => setEditingId(log.id)}>
                 <Text style={styles.editBtnText}>✏️</Text>
@@ -2569,6 +2648,7 @@ function HistoryTab({ workoutLogs, onUpdateWorkoutLog, onDeleteWorkoutLog }) {
                           key={`ss_${sid}`}
                           logs={ordered}
                           outerNumber={muscleScopedOrderMap[scopeKey]?.[sid]}
+                          showDate
                           editingId={editingId}
                           setEditingId={setEditingId}
                           onSaveEdit={handleSaveEdit}
@@ -2585,7 +2665,7 @@ function HistoryTab({ workoutLogs, onUpdateWorkoutLog, onDeleteWorkoutLog }) {
                   {logs.filter(l => !(l.isSuperset === true && l.supersetId)).map(l => {
                     const col = MUSCLE_COLOR[l.muscleGroup] || C.primary;
                     const scopeKey = `${String(l.date).slice(0, 10)}__${l.muscleGroup || 'Other'}`;
-                    return renderLogEntry(l, col, muscleScopedOrderMap[scopeKey]?.[l.id]);
+                    return renderLogEntry(l, col, muscleScopedOrderMap[scopeKey]?.[l.id], true);
                   })}
                 </>
               )}
@@ -2841,6 +2921,7 @@ const styles = StyleSheet.create({
   musclePanelHeader:{ fontSize: 16, fontWeight: '800', marginBottom: 12, textTransform: 'uppercase', letterSpacing: 1 },
   inputWrapper:     { position: 'relative', zIndex: 10, marginBottom: 12 },
   exerciseInput:    { backgroundColor: C.bg, borderWidth: 1, borderColor: C.border, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 13, fontSize: 14, minHeight: 48, color: C.text },
+  equipmentInput:   { backgroundColor: C.bg, borderWidth: 1, borderColor: C.border, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 11, fontSize: 13, minHeight: 42, color: C.text, marginTop: 8 },
   suggestionList:   { position: 'absolute', top: 44, left: 0, right: 0, backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: C.border, borderRadius: 10, zIndex: 99, maxHeight: 200, overflow: 'hidden' },
   suggestionItem:   { paddingVertical: 11, paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: C.border },
   suggestionText:   { fontSize: 14, color: C.text },
@@ -2933,6 +3014,9 @@ const styles = StyleSheet.create({
   historyExerciseOrderText: { color: C.primary, fontSize: 10, fontWeight: '900' },
   historyExerciseName:{ fontSize: 15, fontWeight: '700', color: C.text },
   historyMuscleTag:  { fontSize: 11, fontWeight: '600', marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.8 },
+  exHistEntryDate:   { fontSize: 11, color: C.muted, fontWeight: '600', marginTop: 2 },
+  equipmentTag:      { backgroundColor: 'rgba(139,92,246,0.14)', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2, borderWidth: 1, borderColor: 'rgba(139,92,246,0.3)' },
+  equipmentTagText:  { fontSize: 10, fontWeight: '700', color: C.primary },
   editBtn:           { padding: 6, marginLeft: 6 },
   editBtnText:       { fontSize: 16 },
   deleteBtn:         { padding: 6, marginLeft: 2 },

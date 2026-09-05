@@ -17,7 +17,7 @@ import {
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { database } from '../utils/database';
 import ClearableTextInput from '../components/ClearableTextInput';
-import { NotificationService, getDefaultNotificationSettings } from '../utils/notifications';
+import { NotificationService, getDefaultNotificationSettings, CUSTOM_RULE_METRICS, CUSTOM_RULE_OPERATORS, validateCustomRule } from '../utils/notifications';
 import { getProgressPhotoStorageBytes, formatBytes, reconcileRestoredPhotos } from '../utils/progress-photos';
 
 // ---------------------------------------------------------------------------
@@ -335,6 +335,7 @@ export default function Settings({
   onUpdateProfile,
   customFoods = [],
   onAddCustomFood,
+  onUpdateCustomFood,
   onDeleteCustomFood,
   onClearAllData,
   onExportData,
@@ -364,6 +365,9 @@ export default function Settings({
   const [foodCarbs, setFoodCarbs] = useState('');
   const [foodFat, setFoodFat] = useState('');
   const [foodFibre, setFoodFibre] = useState('');
+  // Non-null while editing an existing custom food -- reuses the exact same
+  // form/fields as creation. When null, the form is in "add new" mode.
+  const [editingFoodId, setEditingFoodId] = useState(null);
 
   // ── Data & Backup state ────────────────────────────────────────────────
   const [exportModalVisible, setExportModalVisible] = useState(false);
@@ -401,6 +405,73 @@ export default function Settings({
     });
   }, [notificationSettings, profile, todayStats]);
 
+  // ── Custom Notification Rules state (Change 6) ────────────────────────
+  const [ruleMetric, setRuleMetric] = useState(CUSTOM_RULE_METRICS[0].key);
+  const [ruleOperator, setRuleOperator] = useState('lt');
+  const [ruleThreshold, setRuleThreshold] = useState('');
+  const [ruleHour, setRuleHour] = useState(20);
+  const [ruleMinute, setRuleMinute] = useState(0);
+  const [ruleError, setRuleError] = useState('');
+
+  const rescheduleAfterRuleChange = useCallback(async (next) => {
+    // Mirrors the exact pattern already used by the Master Notifications
+    // toggle/Save button above -- reuses the same scheduling call rather
+    // than a second notification pathway. hasToday*/todayCalories/
+    // todayProtein use the same "assume true, let scheduleConfiguredReminders
+    // itself decide" placeholders already used there; the extra ctx fields
+    // are best-effort from todayStats (may be undefined for fields
+    // todayStats doesn't carry -- evaluateCustomRule already treats a
+    // missing/non-finite value as "rule not met", never a fabricated 0).
+    await NotificationService.scheduleConfiguredReminders({
+      settings: next, profile, hasTodayFood: true, hasTodaySleep: true, hasTodayWorkout: true,
+      todayCalories: todayStats.calories || 0, todayProtein: todayStats.protein || 0,
+      todayCarbs: todayStats.carbs, todayFats: todayStats.fats, todayFibre: todayStats.fibre,
+      todayWater: todayStats.water, todaySleepHours: todayStats.sleepHours,
+      workoutsThisWeek: todayStats.workoutsThisWeek, currentWeight: profile?.currentWeight ?? profile?.weight,
+      recoveryScore: todayStats.recoveryScore,
+      force: true,
+    });
+  }, [profile, todayStats]);
+
+  const handleAddCustomRule = useCallback(async () => {
+    const rule = {
+      id: Date.now().toString(),
+      metric: ruleMetric,
+      operator: ruleOperator,
+      threshold: parseFloat(ruleThreshold),
+      hour: Number(ruleHour),
+      minute: Number(ruleMinute),
+      enabled: true,
+    };
+    const check = validateCustomRule(rule);
+    if (!check.valid) { setRuleError(check.error); return; }
+    setRuleError('');
+    const next = { ...notificationSettings, customRules: [...(notificationSettings.customRules || []), rule] };
+    setNotificationSettings(next);
+    await database.saveNotificationSettings(next);
+    await rescheduleAfterRuleChange(next);
+    setRuleThreshold('');
+  }, [ruleMetric, ruleOperator, ruleThreshold, ruleHour, ruleMinute, notificationSettings, rescheduleAfterRuleChange]);
+
+  const handleToggleCustomRule = useCallback(async (id) => {
+    const next = { ...notificationSettings, customRules: (notificationSettings.customRules || []).map(r => r.id === id ? { ...r, enabled: !r.enabled } : r) };
+    setNotificationSettings(next);
+    await database.saveNotificationSettings(next);
+    await rescheduleAfterRuleChange(next);
+  }, [notificationSettings, rescheduleAfterRuleChange]);
+
+  const handleDeleteCustomRule = useCallback(async (id) => {
+    // Removing the rule from settings.customRules means the scheduling loop
+    // will no longer visit it at all (it can only cancel/reschedule ids it
+    // currently iterates) -- explicitly cancel this rule's own notification
+    // id first so a deleted rule can't keep firing.
+    await NotificationService.cancelCustomRule(id);
+    const next = { ...notificationSettings, customRules: (notificationSettings.customRules || []).filter(r => r.id !== id) };
+    setNotificationSettings(next);
+    await database.saveNotificationSettings(next);
+    await rescheduleAfterRuleChange(next);
+  }, [notificationSettings, rescheduleAfterRuleChange]);
+
   // ── Save Goals ──────────────────────────────────────────────────────────
   const handleSaveGoals = useCallback(() => {
     if (onUpdateProfile) {
@@ -425,11 +496,13 @@ export default function Settings({
     proteinTarget, carbTarget, fatTarget, sleepTarget, workoutTarget, waterTarget,
   ]);
 
-  // ── Add Custom Food ─────────────────────────────────────────────────────
+  // ── Add / Save Custom Food ──────────────────────────────────────────────
+  // Same form drives both creation and editing. In edit mode (editingFoodId
+  // set) this updates the existing record in place via onUpdateCustomFood
+  // instead of creating a new one via onAddCustomFood.
   const handleAddFood = useCallback(() => {
     if (!foodName.trim()) return;
     const entry = {
-      id: Date.now().toString(),
       name: foodName.trim(),
       qty: parseFloat(foodQty) || 100,
       unit: foodUnit,
@@ -439,7 +512,12 @@ export default function Settings({
       fat: parseFloat(foodFat) || 0,
       fibre: parseFloat(foodFibre) || 0,
     };
-    if (onAddCustomFood) onAddCustomFood(entry);
+    if (editingFoodId) {
+      if (onUpdateCustomFood) onUpdateCustomFood(editingFoodId, entry);
+      setEditingFoodId(null);
+    } else {
+      if (onAddCustomFood) onAddCustomFood({ id: Date.now().toString(), ...entry });
+    }
     setFoodName('');
     setFoodQty('100');
     setFoodUnit('g');
@@ -448,7 +526,27 @@ export default function Settings({
     setFoodCarbs('');
     setFoodFat('');
     setFoodFibre('');
-  }, [foodName, foodQty, foodUnit, foodCal, foodProtein, foodCarbs, foodFat, foodFibre, onAddCustomFood]);
+  }, [foodName, foodQty, foodUnit, foodCal, foodProtein, foodCarbs, foodFat, foodFibre, editingFoodId, onAddCustomFood, onUpdateCustomFood]);
+
+  // Populates the (shared) form with an existing food's current values so
+  // the user is editing, not creating a second entry.
+  const handleEditFood = useCallback((food) => {
+    setEditingFoodId(food.id);
+    setFoodName(String(food.name || ''));
+    setFoodQty(String(food.qty ?? 100));
+    setFoodUnit(food.unit || 'g');
+    setFoodCal(String(food.calories ?? ''));
+    setFoodProtein(String(food.protein ?? ''));
+    setFoodCarbs(String(food.carbs ?? ''));
+    setFoodFat(String(food.fat ?? ''));
+    setFoodFibre(String(food.fibre ?? ''));
+  }, []);
+
+  const handleCancelEditFood = useCallback(() => {
+    setEditingFoodId(null);
+    setFoodName(''); setFoodQty('100'); setFoodUnit('g');
+    setFoodCal(''); setFoodProtein(''); setFoodCarbs(''); setFoodFat(''); setFoodFibre('');
+  }, []);
 
   // ── Delete Custom Food ──────────────────────────────────────────────────
   const handleDeleteFood = useCallback(
@@ -877,7 +975,10 @@ export default function Settings({
       </SectionCard>
 
       {/* ── 2. Custom Foods ─────────────────────────────────────────── */}
-      <SectionCard title="🥗 Custom Foods" subtitle="Add foods to your personal AI dictionary">
+      <SectionCard
+        title="🥗 Custom Foods"
+        subtitle={editingFoodId ? 'Editing an existing food' : 'Add foods to your personal AI dictionary'}
+      >
 
         {/* Name */}
         <Text style={styles.inputLabel}>Food Name</Text>
@@ -983,21 +1084,33 @@ export default function Settings({
         </View>
 
         <TouchableOpacity style={styles.primaryButton} onPress={handleAddFood} activeOpacity={0.8}>
-          <Text style={styles.primaryButtonText}>+ Add to AI Dictionary</Text>
+          <Text style={styles.primaryButtonText}>{editingFoodId ? '✓ Save Changes' : '+ Add to AI Dictionary'}</Text>
         </TouchableOpacity>
+        {editingFoodId ? (
+          <TouchableOpacity style={styles.secondaryButton} onPress={handleCancelEditFood} activeOpacity={0.8}>
+            <Text style={styles.secondaryButtonText}>Cancel Edit</Text>
+          </TouchableOpacity>
+        ) : null}
 
         {/* Existing custom foods list */}
         {customFoods.length > 0 && (
           <View style={styles.foodList}>
             <View style={styles.divider} />
             {customFoods.map((food) => (
-              <View key={food.id} style={styles.foodItem}>
+              <View key={food.id} style={[styles.foodItem, editingFoodId === food.id && styles.foodItemEditing]}>
                 <View style={styles.foodItemInfo}>
                   <Text style={styles.foodItemName}>{food.name}</Text>
                   <Text style={styles.foodItemMeta}>
                     per {food.qty}{food.unit} · {food.calories} kcal · P {food.protein}g · C {food.carbs}g · F {food.fat}g · Fibre {food.fibre ?? 0}g
                   </Text>
                 </View>
+                <TouchableOpacity
+                  style={styles.editBtn}
+                  onPress={() => handleEditFood(food)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.editBtnText}>✏️</Text>
+                </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.deleteBtn}
                   onPress={() => handleDeleteFood(food)}
@@ -1173,6 +1286,77 @@ export default function Settings({
           setSavedMsg('✓ Notification settings saved'); setTimeout(() => setSavedMsg(''), 2000);
         }}><Text style={styles.secondaryButtonText}>Save Notification Settings</Text></TouchableOpacity>
         <Text style={styles.instructionText}>Push = mobile notification. Toast = in-app feedback. The existing toast system is kept separate.</Text>
+
+        {/* ── Custom Notification Rules (Change 6) ──────────────────── */}
+        <View style={styles.divider} />
+        <Text style={styles.notificationLabel}>Custom Rules</Text>
+        <Text style={styles.instructionText}>
+          Create your own reminders from any tracked metric, e.g. "If fibre is below 25g, remind me at 8:00 PM."
+        </Text>
+
+        {(notificationSettings.customRules || []).map(rule => {
+          const metricDef = CUSTOM_RULE_METRICS.find(m => m.key === rule.metric);
+          const opDef = CUSTOM_RULE_OPERATORS.find(o => o.key === rule.operator);
+          return (
+            <View key={rule.id} style={styles.ruleCard}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.ruleCardText}>
+                  If <Text style={styles.ruleCardBold}>{metricDef?.label || rule.metric}</Text> {opDef?.label || rule.operator} <Text style={styles.ruleCardBold}>{rule.threshold}{metricDef?.unit ? ` ${metricDef.unit}` : ''}</Text>
+                </Text>
+                <Text style={styles.ruleCardMeta}>Checked around {String(rule.hour).padStart(2,'0')}:{String(rule.minute).padStart(2,'0')}</Text>
+              </View>
+              <TouchableOpacity style={[styles.toggle, rule.enabled && styles.toggleOn]} onPress={() => handleToggleCustomRule(rule.id)}>
+                <View style={[styles.toggleKnob, rule.enabled && styles.toggleKnobOn]} />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.deleteBtn} onPress={() => handleDeleteCustomRule(rule.id)}>
+                <Text style={styles.deleteBtnText}>🗑️</Text>
+              </TouchableOpacity>
+            </View>
+          );
+        })}
+
+        <View style={styles.ruleForm}>
+          <Text style={styles.inputLabel}>Metric</Text>
+          <View style={styles.chipRow}>
+            {CUSTOM_RULE_METRICS.map(m => (
+              <TouchableOpacity key={m.key} style={[styles.chip, ruleMetric === m.key && styles.chipActive]} onPress={() => setRuleMetric(m.key)}>
+                <Text style={[styles.chipText, ruleMetric === m.key && styles.chipTextActive]}>{m.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <Text style={styles.inputLabel}>Condition</Text>
+          <View style={styles.chipRow}>
+            {CUSTOM_RULE_OPERATORS.map(o => (
+              <TouchableOpacity key={o.key} style={[styles.chip, ruleOperator === o.key && styles.chipActive]} onPress={() => setRuleOperator(o.key)}>
+                <Text style={[styles.chipText, ruleOperator === o.key && styles.chipTextActive]}>{o.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <Text style={styles.inputLabel}>Threshold</Text>
+          <ClearableTextInput
+            style={[styles.input, styles.fullInput]}
+            value={ruleThreshold}
+            onChangeText={setRuleThreshold}
+            placeholder="e.g. 25"
+            placeholderTextColor={C.muted2}
+            keyboardType="numeric"
+          />
+
+          <TimePickerField
+            label="Check time"
+            hour={ruleHour}
+            minute={ruleMinute}
+            onChange={(h, m) => { setRuleHour(h); setRuleMinute(m); }}
+          />
+
+          {ruleError ? <Text style={styles.errorText}>{ruleError}</Text> : null}
+
+          <TouchableOpacity style={styles.primaryButton} onPress={handleAddCustomRule} activeOpacity={0.8}>
+            <Text style={styles.primaryButtonText}>+ Add Rule</Text>
+          </TouchableOpacity>
+        </View>
       </SectionCard>
 
       {/* ── 6. Danger Zone ──────────────────────────────────────────── */}
@@ -1357,6 +1541,17 @@ function NotificationRow({ label, config, onChange }) {
 
 const styles = StyleSheet.create({
   notificationRow:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginBottom:8}, notificationBlock:{marginBottom:14}, notificationLabel:{color:C.text,fontSize:13,fontWeight:'700'}, notificationType:{color:C.muted2,fontSize:10,marginTop:4}, toggle:{width:48,height:28,borderRadius:16,backgroundColor:'rgba(255,255,255,0.08)',padding:3,justifyContent:'center'}, toggleOn:{backgroundColor:C.primary}, toggleKnob:{width:22,height:22,borderRadius:11,backgroundColor:'#fff'}, toggleKnobOn:{alignSelf:'flex-end'},
+  errorText: { color: '#ef4444', fontSize: 12, marginTop: 4, marginBottom: 8 },
+  ruleCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 12, borderWidth: 1, borderColor: C.border, padding: 12, marginTop: 10, gap: 8 },
+  ruleCardText: { color: C.muted, fontSize: 12, lineHeight: 17 },
+  ruleCardBold: { color: C.text, fontWeight: '700' },
+  ruleCardMeta: { color: C.muted2, fontSize: 10, marginTop: 4 },
+  ruleForm: { marginTop: 14, padding: 12, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.02)', borderWidth: 1, borderColor: C.border },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 },
+  chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, borderWidth: 1, borderColor: C.border2, backgroundColor: 'rgba(255,255,255,0.04)' },
+  chipActive: { borderColor: C.primary, backgroundColor: 'rgba(139,92,246,0.16)' },
+  chipText: { color: C.muted, fontSize: 12, fontWeight: '600' },
+  chipTextActive: { color: C.text },
   timePickerButton:{backgroundColor:'rgba(255,255,255,0.05)',borderWidth:1,borderColor:C.border2,borderRadius:10,paddingHorizontal:12,paddingVertical:11,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}, timePickerText:{color:C.text,fontSize:14,fontWeight:'700'}, timePickerChevron:{color:C.muted,fontSize:24,lineHeight:20}, timeModalOverlay:{flex:1,backgroundColor:'rgba(0,0,0,0.65)',justifyContent:'center',alignItems:'center',padding:24}, timeModalCard:{width:'100%',maxWidth:360,backgroundColor:C.card,borderRadius:20,borderWidth:1,borderColor:C.border,padding:18,alignItems:'center'}, timeModalActions:{width:'100%',flexDirection:'row',gap:10,marginTop:12}, timeModalActionsButton:{flex:1},
   container: {
     flex: 1,
@@ -1578,6 +1773,11 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: C.border,
   },
+  foodItemEditing: {
+    backgroundColor: 'rgba(139,92,246,0.08)',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+  },
   foodItemInfo: {
     flex: 1,
     paddingRight: 10,
@@ -1592,6 +1792,12 @@ const styles = StyleSheet.create({
     color: C.muted,
     fontSize: 12,
     lineHeight: 16,
+  },
+  editBtn: {
+    padding: 6,
+  },
+  editBtnText: {
+    fontSize: 16,
   },
   deleteBtn: {
     padding: 6,

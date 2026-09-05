@@ -46,15 +46,22 @@ export function sessionMetrics(log = {}) {
   return { sets, volume, bestSet, maxWeight, maxRepsAtMaxWeight, estimated1RM };
 }
 
-export function exerciseHistory(logs = [], exerciseName, beforeDate = null) {
-  return logs.filter(l => l.exerciseName === exerciseName && l.isSuperset !== true && (!beforeDate || String(l.date).slice(0, 10) < String(beforeDate).slice(0, 10)));
+export function exerciseHistory(logs = [], exerciseName, beforeDate = null, equipment = undefined) {
+  return logs.filter(l => l.exerciseName === exerciseName && l.isSuperset !== true && (!beforeDate || String(l.date).slice(0, 10) < String(beforeDate).slice(0, 10))
+    // When `equipment` is passed, scope to logs on that same machine only
+    // (missing/'' equipment is its own bucket) -- prevents two different
+    // machines doing the same named exercise from being merged into one
+    // progression/PR line. Omitting the param keeps prior behavior exactly
+    // (all equipment pooled together), so existing callers are unaffected.
+    && (equipment === undefined || (l.equipment || '') === (equipment || '')));
 }
 
-export function getExerciseProgress(logs = [], exerciseName) {
-  const normalRows = logs.filter(l => l.exerciseName === exerciseName && l.isSuperset !== true)
+export function getExerciseProgress(logs = [], exerciseName, equipment = undefined) {
+  const scoped = equipment === undefined ? logs : logs.filter(l => (l.equipment || '') === (equipment || ''));
+  const normalRows = scoped.filter(l => l.exerciseName === exerciseName && l.isSuperset !== true)
     .map(l => ({ log: l, metrics: sessionMetrics(l), date: String(l.date).slice(0, 10), isSuperset: false }))
     .sort((a,b) => a.date.localeCompare(b.date));
-  const supersetRows = logs.filter(l => l.exerciseName === exerciseName && l.isSuperset === true)
+  const supersetRows = scoped.filter(l => l.exerciseName === exerciseName && l.isSuperset === true)
     .map(l => ({ log: l, metrics: sessionMetrics(l), date: String(l.date).slice(0, 10), isSuperset: true, supersetId: l.supersetId, supersetOrder: l.supersetOrder }))
     .sort((a,b) => a.date.localeCompare(b.date) || ((Number(a.supersetOrder)||0) - (Number(b.supersetOrder)||0)));
   const all = normalRows.flatMap(r => r.metrics.sets.map(s => ({ ...s, date: r.date, log: r.log })));
@@ -65,12 +72,18 @@ export function getExerciseProgress(logs = [], exerciseName) {
   return { rows: normalRows, supersetRows, bestWeight, bestRepsAtWeight, bestVolume, best1RM };
 }
 
+// `newLog.equipment` (if present) automatically scopes the comparison to
+// previous logs on the SAME machine only -- '' / missing equipment is its
+// own bucket on both sides, so untagged legacy logs keep comparing only
+// against each other exactly as before this feature existed, while a
+// machine-tagged log is never compared against a different machine.
 export function compareWorkoutForPR(newLog, previousLogs = []) {
   const current = sessionMetrics(newLog);
   // Superset performances are valid history, but never establish or update
   // normal PRs/progression.
   if (newLog?.isSuperset === true) return { current, previousWeight: 0, previousVolume: 0, messages: [] };
-  const previous = previousLogs.filter(l => l.exerciseName === newLog.exerciseName && l.isSuperset !== true && String(l.id) !== String(newLog.id));
+  const newEquipment = newLog?.equipment || '';
+  const previous = previousLogs.filter(l => l.exerciseName === newLog.exerciseName && l.isSuperset !== true && String(l.id) !== String(newLog.id) && (l.equipment || '') === newEquipment);
   const previousRows = previous.map(l => sessionMetrics(l));
   const previousWeight = previousRows.length ? Math.max(...previousRows.map(m => m.maxWeight)) : 0;
   const previousVolume = previousRows.length ? Math.max(...previousRows.map(m => m.volume)) : 0;

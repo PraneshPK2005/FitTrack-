@@ -6,6 +6,12 @@
  * - exportAllData / importAllData (backup/restore)
  */
 import storage from './storage';
+// Previously missing (see prior fix): getCustomFoods()'s fibre-migration
+// step below calls estimateFibrePer100g() but this file never imported it,
+// so every getCustomFoods() call threw ReferenceError whenever any custom
+// food lacked a fibre field -- and since App.js's loadAll() awaits
+// getCustomFoods() inside the same Promise.all as every other loader, that
+// one throw silently wiped out food/workout/sleep/etc. state on every load.
 import { estimateFibrePer100g } from './food-database';
 
 const KEYS = {
@@ -245,6 +251,13 @@ export const database = {
       protein:  Number(item.protein)  || 0,
       carbs:    Number(item.carbs)    || 0,
       fats:     Number(item.fats)     || 0,
+      // Was previously dropped here -- Nutrition.js already computes the
+      // correctly-scaled fibre value and passes it in `item.fibre`, but this
+      // explicit field whitelist never carried it into the stored record,
+      // so every logged food persisted with fibre hard-set to 0 regardless
+      // of what was calculated/shown pre-log. Follows the exact same
+      // Number(...)||0 pattern already used for calories/protein/carbs/fats.
+      fibre:    Number(item.fibre)    || 0,
     });
     return setJSON(KEYS.foodLogs, logs);
   },
@@ -259,6 +272,11 @@ export const database = {
         protein:  Number(fields.protein  ?? logs[idx].protein)  || 0,
         carbs:    Number(fields.carbs    ?? logs[idx].carbs)    || 0,
         fats:     Number(fields.fats     ?? logs[idx].fats)     || 0,
+        // Editing already passed fibre through via the ...fields spread
+        // above (unlike add, this path wasn't dropping it), but wasn't
+        // coerced/defaulted like the other macros -- aligning it here for
+        // consistency and so a cleared/invalid input can't persist as NaN.
+        fibre:    Number(fields.fibre    ?? logs[idx].fibre)    || 0,
       };
     }
     return setJSON(KEYS.foodLogs, logs);
@@ -558,6 +576,31 @@ export const database = {
   async addCustomFood(food) {
     const foods = await getJSON(KEYS.customFoods, []);
     foods.push({ id: uid(), ...food });
+    return setJSON(KEYS.customFoods, foods);
+  },
+  // Updates an existing custom-food definition in place -- same identity
+  // (id never changes), no duplicate row is created. Logged food records
+  // are plain snapshots taken at log time (see addFoodLog: it copies
+  // name/calories/protein/carbs/fats/fibre directly, with no id/reference
+  // back to KEYS.customFoods), so updating the definition here has no
+  // effect on any historical fittrack_food_logs entry -- exactly matching
+  // "preserve historical logged nutrition" for a snapshot-based architecture.
+  async updateCustomFood(id, fields) {
+    const foods = await getJSON(KEYS.customFoods, []);
+    const idx = foods.findIndex(f => f.id === id);
+    if (idx >= 0) {
+      foods[idx] = {
+        ...foods[idx],
+        ...fields,
+        id: foods[idx].id, // identity is never overwritten by `fields`
+        calories: Number(fields.calories ?? foods[idx].calories) || 0,
+        protein:  Number(fields.protein  ?? foods[idx].protein)  || 0,
+        carbs:    Number(fields.carbs    ?? foods[idx].carbs)    || 0,
+        fat:      Number(fields.fat      ?? foods[idx].fat)      || 0,
+        fibre:    Number(fields.fibre    ?? foods[idx].fibre)    || 0,
+        qty:      Number(fields.qty      ?? foods[idx].qty)      || 100,
+      };
+    }
     return setJSON(KEYS.customFoods, foods);
   },
   async deleteCustomFood(id) {
