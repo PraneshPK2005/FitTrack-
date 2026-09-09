@@ -4,7 +4,7 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, Alert, Tex
 import { calculateRecovery } from '../utils/recovery';
 import { buildWeeklyReport } from '../utils/weekly-report';
 import { pickProgressPhoto, takeProgressPhoto, hashPin, DEFAULT_PROGRESS_PHOTO_CATEGORIES } from '../utils/progress-photos';
-import { database } from '../utils/database';
+import { database, formatSleepHours } from '../utils/database';
 import ClearableTextInput from '../components/ClearableTextInput';
 
 const C = {
@@ -50,7 +50,7 @@ function ScoreRing({ score }) {
 }
 
 // ─── Macro Bar ─────────────────────────────────────────────────
-function MacroBar({ label, current, target, color, unit }) {
+function MacroBar({ label, current, target, color, unit, displayFormatter }) {
   const pct  = target > 0 ? Math.min(1, current / target) : 0;
   const done = pct >= 1;
   const fill = done ? C.green : color;
@@ -59,7 +59,7 @@ function MacroBar({ label, current, target, color, unit }) {
       <View style={s.macroBarTop}>
         <Text style={s.macroBarLabel}>{label}</Text>
         <Text style={[s.macroBarVal, { color: fill }]}>
-          {f2(current)}{unit} <Text style={s.macroBarTarget}>/ {target}{unit}</Text>
+          {displayFormatter ? displayFormatter(current) : `${f2(current)}${unit}`} <Text style={s.macroBarTarget}>/ {displayFormatter ? displayFormatter(target) : `${target}${unit}`}</Text>
         </Text>
       </View>
       <View style={s.track}>
@@ -352,9 +352,7 @@ function TrendBanner({ up, text }) {
 
 function formatDur(h) {
   if (!h) return '—';
-  const hrs  = Math.floor(h);
-  const mins = Math.round((h - hrs) * 60);
-  return mins === 0 ? `${hrs}h` : `${hrs}h ${mins}m`;
+  return formatSleepHours(h);
 }
 
 // ─── Main ──────────────────────────────────────────────────────
@@ -514,7 +512,7 @@ function todayStr() {
 // be served forever even after the underlying inputs changed. Any change to
 // any of these totals changes the signature, which is exactly what forces
 // a recalculation on the next lookup.
-function recoveryInputSignature(date, sleepLogs, foodLogs, waterLogs, workoutLogs) {
+function recoveryInputSignature(date, sleepLogs, foodLogs, waterLogs, workoutLogs, targets) {
   const onDate = arr => (arr || []).filter(x => String(x.date).slice(0, 10) === date);
   const sleep = onDate(sleepLogs).reduce((a, s) => a + (Number(s.duration) || 0), 0);
   const food = onDate(foodLogs).reduce((a, f) => ({
@@ -522,7 +520,13 @@ function recoveryInputSignature(date, sleepLogs, foodLogs, waterLogs, workoutLog
   }), { cal: 0, prot: 0, fibre: 0 });
   const water = onDate(waterLogs).reduce((a, w) => a + (Number(w.amountMl) || 0), 0);
   const workouts = onDate(workoutLogs).length;
-  return `${sleep}|${food.cal}|${food.prot}|${food.fibre}|${water}|${workouts}`;
+  // Including the resolved target values means a stored score only stays
+  // valid while BOTH the underlying logs AND the target-history period that
+  // applied to this date are unchanged -- if the target history is ever
+  // itself edited (not just today's live Settings), old cached scores for
+  // affected dates correctly recalculate rather than silently going stale.
+  const t = targets ? `${targets.sleepTarget}|${targets.proteinTarget}|${targets.calorieTarget}|${targets.fibreTarget}|${targets.waterTargetMl}|${targets.workoutTarget}` : '';
+  return `${sleep}|${food.cal}|${food.prot}|${food.fibre}|${water}|${workouts}|${t}`;
 }
 
 function RecoveryCard({ profile, sleepLogs, foodLogs, waterLogs, workoutLogs }) {
@@ -543,7 +547,14 @@ function RecoveryCard({ profile, sleepLogs, foodLogs, waterLogs, workoutLogs }) 
     let cancelled = false;
     setLoading(true);
     (async () => {
-      const signature = recoveryInputSignature(selectedDate, sleepLogs, foodLogs, waterLogs, workoutLogs);
+      // Resolve the target configuration that was actually effective on
+      // selectedDate (Change 10/11) -- NOT the live current profile. For
+      // "today" this naturally resolves to the same values as the current
+      // profile (today's version), so nothing changes for the live case;
+      // for any earlier date it correctly returns whatever targets were
+      // active back then, even if Settings has since changed.
+      const targets = await database.getTargetForDate(selectedDate);
+      const signature = recoveryInputSignature(selectedDate, sleepLogs, foodLogs, waterLogs, workoutLogs, targets);
       const stored = await database.getRecoveryScoreForDate(selectedDate);
       if (stored && stored.inputSignature === signature) {
         // Stored score still matches today's actual logs for that date --
@@ -551,16 +562,19 @@ function RecoveryCard({ profile, sleepLogs, foodLogs, waterLogs, workoutLogs }) 
         if (!cancelled) { setRec(stored); setLoading(false); }
         return;
       }
-      // No stored score, OR the underlying data has changed since it was
-      // stored (signature mismatch) -- recalculate using the exact same
-      // calculateRecovery logic used for the live "today" card, anchored
-      // to the selected date via asOf. Logs are pre-filtered to <= the
-      // selected date as an extra safeguard against ever pulling in
-      // same-day-or-later data that doesn't belong to this historical view.
+      // No stored score, OR the underlying data/target-history has changed
+      // since it was stored (signature mismatch) -- recalculate using the
+      // exact same calculateRecovery logic used for the live "today" card,
+      // anchored to the selected date via asOf, and using that date's
+      // resolved historical targets (passed in the same `profile` shape
+      // calculateRecovery already expects -- it only ever reads
+      // *Target fields off it, so no change to recovery.js itself is
+      // needed). Logs are pre-filtered to <= the selected date as an extra
+      // safeguard against ever pulling in same-day-or-later data.
       const asOf = new Date(selectedDate + 'T00:00:00');
       const upTo = arr => (arr || []).filter(x => String(x.date).slice(0, 10) <= selectedDate);
       const freshRec = calculateRecovery({
-        profile, asOf,
+        profile: targets, asOf,
         sleepLogs: upTo(sleepLogs), foodLogs: upTo(foodLogs), waterLogs: upTo(waterLogs), workoutLogs: upTo(workoutLogs),
       });
       if (freshRec.available) {
@@ -589,10 +603,12 @@ function RecoveryCard({ profile, sleepLogs, foodLogs, waterLogs, workoutLogs }) 
 
 function WeeklyReportCard({ profile, weightLogs, workoutLogs, sleepLogs, foodLogs, waterLogs }) {
   const [weekOffset,setWeekOffset]=React.useState(0);
-  const r=React.useMemo(() => buildWeeklyReport({profile,weightLogs,workoutLogs,sleepLogs,foodLogs,waterLogs,weekOffset}), [profile,weightLogs,workoutLogs,sleepLogs,foodLogs,waterLogs,weekOffset]);
+  const [targetHistory, setTargetHistory] = React.useState([]);
+  React.useEffect(() => { database.getTargetHistory().then(setTargetHistory).catch(() => setTargetHistory([])); }, []);
+  const r=React.useMemo(() => buildWeeklyReport({profile,weightLogs,workoutLogs,sleepLogs,foodLogs,waterLogs,weekOffset,targetHistory}), [profile,weightLogs,workoutLogs,sleepLogs,foodLogs,waterLogs,weekOffset,targetHistory]);
   return <View style={s.card}><View style={s.cardHeaderRow}><Text style={s.cardHdr}>📊 Weekly Fitness Report</Text><View style={s.weekNav}><TouchableOpacity onPress={()=>setWeekOffset(v=>v+1)}><Text style={s.actionTxt}>‹</Text></TouchableOpacity><Text style={s.weekLabel}>{(() => { const end=new Date(); end.setDate(end.getDate()-weekOffset*7); const start=new Date(end); start.setDate(end.getDate()-6); const fmt=d=>d.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}); return `${fmt(start)} – ${fmt(end)}`; })()}</Text><TouchableOpacity disabled={weekOffset===0} onPress={()=>setWeekOffset(v=>Math.max(0,v-1))}><Text style={[s.actionTxt,weekOffset===0&&{opacity:.3}]}>›</Text></TouchableOpacity></View></View>
     <View style={s.reportGrid}>{[
-      ['🏋️ Workouts',`${r.workout.days}/${r.workout.target}`],['🥩 Protein',`${r.nutrition.avgProtein} g/day`],['🔥 Calories',`${r.nutrition.avgCalories} kcal/day`],['💧 Water',`${(r.water.avgMl/1000).toFixed(2)} L/day`],['🛌 Sleep',`${r.sleep.avg.toFixed(1)} h`],['⚖️ Weight',r.weight.change==null?'—':`${r.weight.change>=0?'+':''}${r.weight.change.toFixed(1)} kg`],['❤️ Recovery',r.recovery.average==null?'—':`${r.recovery.average}`],['🏆 New PRs',String(r.prs.length)]
+      ['🏋️ Workouts',`${r.workout.days}/${r.workout.target}`],['🥩 Protein',`${r.nutrition.avgProtein} g/day`],['🔥 Calories',`${r.nutrition.avgCalories} kcal/day`],['💧 Water',`${(r.water.avgMl/1000).toFixed(2)} L/day`],['🛌 Sleep',formatSleepHours(r.sleep.avg)],['⚖️ Weight',r.weight.change==null?'—':`${r.weight.change>=0?'+':''}${r.weight.change.toFixed(1)} kg`],['❤️ Recovery',r.recovery.average==null?'—':`${r.recovery.average}`],['🏆 New PRs',String(r.prs.length)]
     ].map(([a,b])=><View key={a} style={s.reportCell}><Text style={s.reportLabel}>{a}</Text><Text style={s.reportValue}>{b}</Text></View>)}</View>
     <Text style={s.reportSub}>Overall weekly score: <Text style={{color:C.primary,fontWeight:'900'}}>{r.overall}/100</Text> · Most trained: {r.workout.mostTrained}</Text>
     {r.prs.slice(0,3).map(pr=><Text key={pr.exercise} style={s.reportPR}>🏆 {pr.exercise} — {pr.weight} kg</Text>)}
@@ -1080,7 +1096,7 @@ export default function Dashboard({ profile, todayStats, weightLogs, workoutLogs
         <MacroBar label="Protein"  current={ts.protein  || 0}   target={profile.proteinTarget || 140}  color={C.primary} unit="g" />
         <MacroBar label="Carbs"    current={ts.carbs    || 0}   target={profile.carbTarget    || 250}  color={C.amber}   unit="g" />
         <MacroBar label="Fats"     current={ts.fats     || 0}   target={profile.fatTarget     || 70}   color={C.rose}    unit="g" />
-        <MacroBar label="Sleep"    current={ts.sleepHours || 0} target={profile.sleepTarget   || 8}    color={C.green}   unit="h" />
+        <MacroBar label="Sleep"    current={ts.sleepHours || 0} target={profile.sleepTarget   || 8}    color={C.green}   unit="h" displayFormatter={formatSleepHours} />
       </View>
 
       <WaterCard profile={profile} waterLogs={waterLogs} onAddWater={onAddWater} onUpdateWater={onUpdateWater} onDeleteWater={onDeleteWater} />
@@ -1093,7 +1109,7 @@ export default function Dashboard({ profile, todayStats, weightLogs, workoutLogs
         {[
           { label: 'Current Weight', value: `${profile.currentWeight}kg`, color: C.cyan    },
           { label: 'Workouts / Week', value: String(weekWorkouts),         color: C.primary },
-          { label: 'Avg Sleep',       value: `${avgSleep}h`,              color: C.green   },
+          { label: 'Avg Sleep',       value: avgSleep === '--' ? '--' : formatSleepHours(avgSleep),  color: C.green   },
         ].map(st => (
           <View key={st.label} style={s.statBox}>
             <Text style={[s.statVal, { color: st.color }]}>{st.value}</Text>

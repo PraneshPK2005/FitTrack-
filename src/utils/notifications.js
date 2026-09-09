@@ -63,21 +63,31 @@ export function showToast(message, type = 'info', duration = DEFAULT_TOAST_DURAT
 // Only fields that can be reliably evaluated from data this app already
 // tracks are exposed -- nothing here can reach outside that.
 export const CUSTOM_RULE_METRICS = [
-  { key: 'fibre',      label: 'Fibre (g)',              unit: 'g'   },
-  { key: 'fats',       label: 'Fats (g)',                unit: 'g'   },
-  { key: 'protein',    label: 'Protein (g)',             unit: 'g'   },
-  { key: 'carbs',      label: 'Carbs (g)',               unit: 'g'   },
-  { key: 'calories',   label: 'Calories (kcal)',         unit: 'kcal'},
-  { key: 'water',      label: 'Water (ml)',              unit: 'ml'  },
-  { key: 'sleepHours', label: 'Sleep last night (hrs)',  unit: 'hrs' },
-  { key: 'workoutsThisWeek', label: 'Workouts this week', unit: ''   },
-  { key: 'weight',     label: 'Current weight (kg)',     unit: 'kg'  },
-  { key: 'recoveryScore', label: 'Recovery score',       unit: ''    },
+  { key: 'calories',   label: 'Calories (kcal)',         unit: 'kcal', group: 'Nutrition' },
+  { key: 'protein',    label: 'Protein (g)',             unit: 'g',    group: 'Nutrition' },
+  { key: 'carbs',      label: 'Carbs (g)',               unit: 'g',    group: 'Nutrition' },
+  { key: 'fats',       label: 'Fats (g)',                unit: 'g',    group: 'Nutrition' },
+  { key: 'fibre',      label: 'Fibre (g)',               unit: 'g',    group: 'Nutrition' },
+  { key: 'water',      label: 'Water (ml)',              unit: 'ml',   group: 'Nutrition' },
+  { key: 'sleepHours', label: 'Sleep last night (hrs)',  unit: 'hrs',  group: 'Recovery / Health' },
+  { key: 'recoveryScore', label: 'Recovery Score',       unit: '',     group: 'Recovery / Health' },
+  { key: 'weight',     label: 'Current weight (kg)',     unit: 'kg',   group: 'Recovery / Health' },
+  { key: 'workoutsThisWeek', label: 'Workouts this week', unit: '',    group: 'Training' },
 ];
 
 export const CUSTOM_RULE_OPERATORS = [
   { key: 'lt', label: 'is below' },
   { key: 'gt', label: 'exceeds'  },
+];
+
+export const CUSTOM_RULE_FREQUENCIES = [
+  { key: 'daily',  label: 'Daily'  },
+  { key: 'weekly', label: 'Weekly' },
+];
+
+export const WEEKDAYS = [
+  { key: 0, label: 'Sun' }, { key: 1, label: 'Mon' }, { key: 2, label: 'Tue' }, { key: 3, label: 'Wed' },
+  { key: 4, label: 'Thu' }, { key: 5, label: 'Fri' }, { key: 6, label: 'Sat' },
 ];
 
 // Every field this reads is a plain number the caller computed from
@@ -96,7 +106,9 @@ export function evaluateCustomRule(rule, ctx = {}) {
 
 // Validates a rule's shape before it's ever saved/scheduled -- rejects
 // anything structurally invalid so a bad rule can't silently no-op forever
-// or crash the scheduler.
+// or crash the scheduler. `frequency` defaults to 'daily' when absent so
+// rules created before this field existed keep loading/working unchanged
+// (Change 30) -- validation never rejects an old rule purely for missing it.
 export function validateCustomRule(rule) {
   if (!rule) return { valid: false, error: 'Rule is required.' };
   if (!CUSTOM_RULE_METRICS.some(m => m.key === rule.metric)) return { valid: false, error: 'Choose a valid metric.' };
@@ -105,10 +117,20 @@ export function validateCustomRule(rule) {
   const hour = Number(rule.hour), minute = Number(rule.minute);
   if (!Number.isInteger(hour) || hour < 0 || hour > 23) return { valid: false, error: 'Choose a valid hour (0-23).' };
   if (!Number.isInteger(minute) || minute < 0 || minute > 59) return { valid: false, error: 'Choose a valid minute (0-59).' };
+  const frequency = rule.frequency || 'daily';
+  if (!CUSTOM_RULE_FREQUENCIES.some(f => f.key === frequency)) return { valid: false, error: 'Choose Daily or Weekly.' };
+  if (frequency === 'weekly') {
+    const weekday = rule.weekday ?? 0;
+    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) return { valid: false, error: 'Choose a valid day of the week.' };
+  }
   return { valid: true, error: null };
 }
 
 function customRuleBody(rule, value) {
+  // If the user typed their own message when creating the rule, that's
+  // what shows in the notification -- otherwise fall back to the
+  // auto-generated description (unchanged from before this field existed).
+  if (rule.message && String(rule.message).trim()) return String(rule.message).trim();
   const metric = CUSTOM_RULE_METRICS.find(m => m.key === rule.metric);
   const label = metric?.label || rule.metric;
   const cmp = rule.operator === 'gt' ? 'exceeded' : 'is below';
@@ -420,8 +442,20 @@ export const NotificationService = {
       const check = validateCustomRule(rule);
       const value = Number(ctx[rule.metric]);
       const met = check.valid && rule.enabled && evaluateCustomRule(rule, ctx);
+      // Old rules saved before frequency existed default to 'daily' here --
+      // never crashes and never forces the user to recreate them (Change 30).
+      const frequency = rule.frequency || 'daily';
       if (granted && met && !inQuiet(Number(rule.hour) || 0, Number(rule.minute) || 0)) {
-        await this.scheduleDaily({ id, title: '🔔 FitTrack Reminder', body: customRuleBody(rule, value), hour: Number(rule.hour) || 0, minute: Number(rule.minute) || 0 });
+        if (frequency === 'weekly') {
+          // Weekly rules are scheduled via scheduleWeekly on the chosen
+          // weekday -- evaluated/fired once a week, never daily, so e.g. a
+          // "workouts this week" rule doesn't spam a notification every
+          // single day just because the underlying value happens to still
+          // be below threshold on multiple days that week.
+          await this.scheduleWeekly({ id, title: '🔔 FitTrack Reminder', body: customRuleBody(rule, value), weekday: Number(rule.weekday) || 0, hour: Number(rule.hour) || 0, minute: Number(rule.minute) || 0 });
+        } else {
+          await this.scheduleDaily({ id, title: '🔔 FitTrack Reminder', body: customRuleBody(rule, value), hour: Number(rule.hour) || 0, minute: Number(rule.minute) || 0 });
+        }
       } else {
         try { await Notifications.cancelScheduledNotificationAsync(id); } catch {}
       }

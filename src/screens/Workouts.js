@@ -367,7 +367,7 @@ function ExercisePanel({
         )}
       </View>
 
-      <View style={styles.inputWrapper}>
+      <View style={styles.exerciseNameWrapper}>
         <ClearableTextInput
           style={styles.exerciseInput}
           placeholder={`Exercise for ${muscle}…`}
@@ -431,14 +431,25 @@ function ExercisePanel({
 
       {/* Optional equipment/machine tag -- lets the same exercise name
           ("Row") be distinguished by which machine performed it ("Cable
-          Machine" vs "Back Machine") for correct, non-misleading PR history. */}
-      <View style={styles.inputWrapper}>
+          Machine" vs "Back Machine") for correct, non-misleading PR history.
+          Uses its own wrapper (equipmentWrapper) with an explicitly LOWER
+          zIndex than exerciseNameWrapper above -- both previously shared
+          the generic `inputWrapper` style with the SAME zIndex (10), which
+          is an unresolved tie between two sibling stacking contexts. That
+          ambiguity is what let the exercise-name dropdown render
+          interleaved with this field's own box instead of cleanly above or
+          below it. Making the stacking order explicit and unambiguous
+          fixes it regardless of platform-specific tie-breaking behavior. */}
+      <View style={styles.equipmentWrapper}>
         <ClearableTextInput
           style={styles.equipmentInput}
           placeholder="Equipment / Machine (optional)"
           placeholderTextColor={C.muted2}
           value={equipment}
           onChangeText={setEquipment}
+          // Still close the dropdown immediately on focus too, as a second,
+          // behavioral guard on top of the structural zIndex fix above.
+          onFocus={() => setShowSuggestions(false)}
           onBlur={() => { if (equipment.trim()) setEquipment(toTitleCase(equipment.trim())); }}
         />
       </View>
@@ -651,6 +662,61 @@ function SupersetLogs({ logs, editingId, setEditingId, onSaveEdit, onDelete, onD
         );
       })}
     </View>
+  );
+}
+
+// Splits `logs` by sessionId (multiple sessions on the same date are never
+// merged into one list) and renders MuscleGroupedLogs once per session, in
+// session order (sorted by each session's first log's id, which is a
+// timestamp-based uid so it sorts chronologically). This is the single
+// shared ordering algorithm for "a day's logs, possibly spanning several
+// sessions" -- used by both the live Log tab (DayLoggedExercises) and
+// Workouts > History > Date, so "Log order = History order" by
+// construction rather than by two implementations happening to agree.
+function SessionGroupedLogs({ logs, editingId, setEditingId, onSaveEdit, onDelete, onDeleteSuperset, onDeleteSessionGroup, showHeaders }) {
+  const bySession = {};
+  (logs || []).forEach(log => {
+    const sid = log.sessionId || '_unassigned';
+    if (!bySession[sid]) bySession[sid] = [];
+    bySession[sid].push(log);
+  });
+  const sessionGroups = Object.entries(bySession).sort((a, b) => {
+    const aFirst = a[1][0]?.id || '';
+    const bFirst = b[1][0]?.id || '';
+    return String(aFirst).localeCompare(String(bFirst));
+  });
+  return (
+    <>
+      {sessionGroups.map(([sid, sLogs], gi) => {
+        const label = sLogs[0]?.sessionName || `Session ${gi + 1}`;
+        return (
+          <View key={sid}>
+            {showHeaders && sessionGroups.length > 1 && (
+              <View style={styles.sessionGroupHeader}>
+                <Text style={styles.sessionGroupHeaderText}>🏋️ {label}</Text>
+                <Text style={styles.sessionGroupCount}>{sLogs.length} exercise{sLogs.length !== 1 ? 's' : ''}</Text>
+                {onDeleteSessionGroup && (
+                  <TouchableOpacity
+                    style={styles.sessionGroupDeleteBtn}
+                    onPress={() => onDeleteSessionGroup(sLogs, label)}
+                  >
+                    <Text style={styles.sessionGroupDeleteBtnText}>🗑️</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
+            <MuscleGroupedLogs
+              logs={sLogs}
+              editingId={editingId}
+              setEditingId={setEditingId}
+              onSaveEdit={onSaveEdit}
+              onDelete={onDelete}
+              onDeleteSuperset={onDeleteSuperset}
+            />
+          </View>
+        );
+      })}
+    </>
   );
 }
 
@@ -933,21 +999,10 @@ function DayLoggedExercises({ date, workoutLogs, onUpdateWorkoutLog, onDeleteWor
 
   // When we're not scoped to a single session, split the day's logs by
   // sessionId so two sessions from the same day are shown as distinct
-  // blocks instead of one merged list.
-  const bySession = {};
-  logsForDate.forEach(log => {
-    const sid = sessionId || log.sessionId || '_unassigned';
-    if (!bySession[sid]) bySession[sid] = [];
-    bySession[sid].push(log);
-  });
-  const sessionGroups = Object.entries(bySession).sort((a, b) => {
-    const aFirst = a[1][0]?.id || '';
-    const bFirst = b[1][0]?.id || '';
-    return String(aFirst).localeCompare(String(bFirst));
-  });
-  // Only show per-session headers (with a delete-this-session action) when
-  // browsing a date rather than viewing the live in-progress session — the
-  // active session already has its own header/delete controls above.
+  // blocks instead of one merged list. Only show per-session headers (with
+  // a delete-this-session action) when browsing a date rather than viewing
+  // the live in-progress session -- the active session already has its own
+  // header/delete controls above.
   const showSessionHeaders = !sessionId;
 
   const handleDeleteSessionGroup = (logs, label) => {
@@ -970,33 +1025,16 @@ function DayLoggedExercises({ date, workoutLogs, onUpdateWorkoutLog, onDeleteWor
   return (
     <View style={styles.dayLogsBlock}>
       <Text style={styles.dayLogsTitle}>📋 Logged for {formatDateLabel(date)}</Text>
-      {sessionGroups.map(([sid, logs], gi) => {
-        const label = logs[0]?.sessionName || `Session ${gi + 1}`;
-        return (
-        <View key={sid}>
-          {showSessionHeaders && (
-            <View style={styles.sessionGroupHeader}>
-              <Text style={styles.sessionGroupHeaderText}>🏋️ {label}</Text>
-              <Text style={styles.sessionGroupCount}>{logs.length} exercise{logs.length !== 1 ? 's' : ''}</Text>
-              <TouchableOpacity
-                style={styles.sessionGroupDeleteBtn}
-                onPress={() => handleDeleteSessionGroup(logs, label)}
-              >
-                <Text style={styles.sessionGroupDeleteBtnText}>🗑️</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-          <MuscleGroupedLogs
-            logs={logs}
-            editingId={editingId}
-            setEditingId={setEditingId}
-            onSaveEdit={handleSaveEdit}
-            onDelete={handleDelete}
-            onDeleteSuperset={handleDeleteSuperset}
-          />
-        </View>
-        );
-      })}
+      <SessionGroupedLogs
+        logs={logsForDate}
+        editingId={editingId}
+        setEditingId={setEditingId}
+        onSaveEdit={handleSaveEdit}
+        onDelete={handleDelete}
+        onDeleteSuperset={handleDeleteSuperset}
+        onDeleteSessionGroup={handleDeleteSessionGroup}
+        showHeaders={showSessionHeaders}
+      />
     </View>
   );
 }
@@ -1604,10 +1642,22 @@ function LogTab({ workoutLogs, onAddWorkoutLog, onUpdateWorkoutLog, onDeleteWork
                 onPersistDraft={exercise => {
                   database.addExerciseToLibrary(exercise).then(rows => onCustomExerciseAdded && onCustomExerciseAdded(rows)).catch(() => {});
                 }}
-                onRequestSuperset={draft => setSupersetComposer({
-                  anchorMuscle: muscle,
-                  anchor: { id: `ss_anchor_${Date.now()}`, muscle, draft },
-                })}
+                onRequestSuperset={draft => {
+                  // The single-exercise draft that was auto-saved to
+                  // exerciseDrafts[muscle] while the user was typing (see
+                  // onDraftChange below) now lives inside the superset
+                  // composer instead -- clear it here so it can't keep
+                  // re-populating a FUTURE normal (non-superset) log for
+                  // this muscle after the superset is eventually logged.
+                  // Without this, initialDraft={exerciseDrafts[muscle]}
+                  // above would still resolve to exercise #1's stale data
+                  // the next time this muscle is logged normally.
+                  clearDraft(muscle);
+                  setSupersetComposer({
+                    anchorMuscle: muscle,
+                    anchor: { id: `ss_anchor_${Date.now()}`, muscle, draft },
+                  });
+                }}
               />
             );
           })}
@@ -2541,12 +2591,23 @@ function HistoryTab({ workoutLogs, onUpdateWorkoutLog, onDeleteWorkoutLog }) {
                 <Text style={styles.historyDateCount}>{logs.length} log{logs.length !== 1 ? 's' : ''}</Text>
               </View>
               {sortMode === 'date' ? (
-                // Date mode represents a real workout session for that day, so
-                // Supersets must keep their actual position in the overall
-                // execution order (workoutOrder/sessionExerciseOrder) instead of
-                // always being pushed to the top. Reuse the same order-aware
-                // renderer the live Log tab already uses so History matches it.
-                <MuscleGroupedLogs
+                // Date mode can contain MULTIPLE distinct workout sessions
+                // on the same calendar date (e.g. a Legs session and a
+                // separate Pull session). Previously this called
+                // MuscleGroupedLogs directly on the whole day's mixed logs,
+                // which sorted purely by each log's own sessionExerciseOrder
+                // -- a number that restarts at 1 for EVERY session, so two
+                // sessions' overlapping order values got interleaved
+                // together once mixed (Session 2's exercise #1 sorting next
+                // to Session 1's exercise #1, etc.), splitting a session
+                // apart instead of keeping it intact. SessionGroupedLogs is
+                // the exact same session-splitting+ordering component the
+                // live Log tab already uses (DayLoggedExercises), so
+                // History now reuses that one algorithm instead of a
+                // second, subtly different one -- each session's exercises
+                // stay together, in that session's own execution order,
+                // with sessions themselves in chronological order.
+                <SessionGroupedLogs
                   logs={logs}
                   editingId={editingId}
                   setEditingId={setEditingId}
@@ -2557,6 +2618,16 @@ function HistoryTab({ workoutLogs, onUpdateWorkoutLog, onDeleteWorkoutLog }) {
                     if (Platform.OS === 'web') { if (window.confirm(`Delete this superset (${logsToDelete.length} exercises)?`)) doDelete(); }
                     else Alert.alert('Delete Superset', `Delete all ${logsToDelete.length} exercises?`, [{text:'Cancel',style:'cancel'},{text:'Delete',style:'destructive',onPress:doDelete}]);
                   }}
+                  onDeleteSessionGroup={(sLogs, label) => {
+                    const msg = `Delete "${label}"? This removes ${sLogs.length} exercise log(s) and cannot be undone.`;
+                    const doDelete = async () => {
+                      await database.deleteWorkoutLogsByIds(sLogs.map(x => x.id));
+                      sLogs.forEach(x => onDeleteWorkoutLog(x.id));
+                    };
+                    if (Platform.OS === 'web') { if (window.confirm(msg)) doDelete(); }
+                    else Alert.alert('Delete Session', msg, [{text:'Cancel',style:'cancel'},{text:'Delete',style:'destructive',onPress:doDelete}]);
+                  }}
+                  showHeaders
                 />
               ) : sortMode === 'muscle' ? (() => {
                 // Muscle mode also groups its rows by date (see `grouped`
@@ -2920,6 +2991,12 @@ const styles = StyleSheet.create({
   exercisePanel:    { backgroundColor: C.card, borderRadius: 20, padding: 18, marginBottom: 16, borderLeftWidth: 4, borderWidth: 1, borderColor: C.border },
   musclePanelHeader:{ fontSize: 16, fontWeight: '800', marginBottom: 12, textTransform: 'uppercase', letterSpacing: 1 },
   inputWrapper:     { position: 'relative', zIndex: 10, marginBottom: 12 },
+  // Explicitly different zIndex values (not both 10) so the exercise-name
+  // dropdown and the equipment field below it have an unambiguous stacking
+  // order instead of a tie between two equal-zIndex sibling stacking
+  // contexts -- see the comment at their usage above.
+  exerciseNameWrapper: { position: 'relative', zIndex: 50, marginBottom: 12 },
+  equipmentWrapper:    { position: 'relative', zIndex: 1,  marginBottom: 12 },
   exerciseInput:    { backgroundColor: C.bg, borderWidth: 1, borderColor: C.border, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 13, fontSize: 14, minHeight: 48, color: C.text },
   equipmentInput:   { backgroundColor: C.bg, borderWidth: 1, borderColor: C.border, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 11, fontSize: 13, minHeight: 42, color: C.text, marginTop: 8 },
   suggestionList:   { position: 'absolute', top: 44, left: 0, right: 0, backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: C.border, borderRadius: 10, zIndex: 99, maxHeight: 200, overflow: 'hidden' },

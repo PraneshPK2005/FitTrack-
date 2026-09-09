@@ -17,7 +17,7 @@ import {
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { database } from '../utils/database';
 import ClearableTextInput from '../components/ClearableTextInput';
-import { NotificationService, getDefaultNotificationSettings, CUSTOM_RULE_METRICS, CUSTOM_RULE_OPERATORS, validateCustomRule } from '../utils/notifications';
+import { NotificationService, getDefaultNotificationSettings, CUSTOM_RULE_METRICS, CUSTOM_RULE_OPERATORS, CUSTOM_RULE_FREQUENCIES, WEEKDAYS, validateCustomRule } from '../utils/notifications';
 import { getProgressPhotoStorageBytes, formatBytes, reconcileRestoredPhotos } from '../utils/progress-photos';
 
 // ---------------------------------------------------------------------------
@@ -350,6 +350,7 @@ export default function Settings({
   const [proteinTarget, setProteinTarget] = useState(String(profile.proteinTarget ?? ''));
   const [carbTarget, setCarbTarget] = useState(String(profile.carbTarget ?? ''));
   const [fatTarget, setFatTarget] = useState(String(profile.fatTarget ?? ''));
+  const [fibreTarget, setFibreTarget] = useState(String(profile.fibreTarget ?? ''));
   const [sleepTarget, setSleepTarget] = useState(String(profile.sleepTarget ?? ''));
   const [workoutTarget, setWorkoutTarget] = useState(String(profile.workoutTarget ?? ''));
   const [waterTarget, setWaterTarget] = useState(String(profile.waterTargetMl ?? 2500));
@@ -409,8 +410,11 @@ export default function Settings({
   const [ruleMetric, setRuleMetric] = useState(CUSTOM_RULE_METRICS[0].key);
   const [ruleOperator, setRuleOperator] = useState('lt');
   const [ruleThreshold, setRuleThreshold] = useState('');
+  const [ruleMessage, setRuleMessage] = useState('');
   const [ruleHour, setRuleHour] = useState(20);
   const [ruleMinute, setRuleMinute] = useState(0);
+  const [ruleFrequency, setRuleFrequency] = useState('daily');
+  const [ruleWeekday, setRuleWeekday] = useState(0);
   const [ruleError, setRuleError] = useState('');
 
   const rescheduleAfterRuleChange = useCallback(async (next) => {
@@ -441,6 +445,13 @@ export default function Settings({
       threshold: parseFloat(ruleThreshold),
       hour: Number(ruleHour),
       minute: Number(ruleMinute),
+      frequency: ruleFrequency,
+      weekday: ruleFrequency === 'weekly' ? Number(ruleWeekday) : undefined,
+      // Optional -- if left blank, the notification uses the same
+      // auto-generated message it always has (see customRuleBody in
+      // notifications.js). Trimmed to '' so an all-whitespace entry is
+      // treated as "not set", not saved as a blank-looking message.
+      message: ruleMessage.trim(),
       enabled: true,
     };
     const check = validateCustomRule(rule);
@@ -451,7 +462,8 @@ export default function Settings({
     await database.saveNotificationSettings(next);
     await rescheduleAfterRuleChange(next);
     setRuleThreshold('');
-  }, [ruleMetric, ruleOperator, ruleThreshold, ruleHour, ruleMinute, notificationSettings, rescheduleAfterRuleChange]);
+    setRuleMessage('');
+  }, [ruleMetric, ruleOperator, ruleThreshold, ruleHour, ruleMinute, ruleFrequency, ruleWeekday, ruleMessage, notificationSettings, rescheduleAfterRuleChange]);
 
   const handleToggleCustomRule = useCallback(async (id) => {
     const next = { ...notificationSettings, customRules: (notificationSettings.customRules || []).map(r => r.id === id ? { ...r, enabled: !r.enabled } : r) };
@@ -484,6 +496,7 @@ export default function Settings({
         proteinTarget: parseInt(proteinTarget, 10) || profile.proteinTarget,
         carbTarget: parseInt(carbTarget, 10) || profile.carbTarget,
         fatTarget: parseInt(fatTarget, 10) || profile.fatTarget,
+        fibreTarget: parseInt(fibreTarget, 10) || profile.fibreTarget,
         sleepTarget: parseFloat(sleepTarget) || profile.sleepTarget,
         workoutTarget: parseInt(workoutTarget, 10) || profile.workoutTarget,
         waterTargetMl: parseInt(waterTarget, 10) || profile.waterTargetMl || 2500,
@@ -493,7 +506,7 @@ export default function Settings({
     setTimeout(() => setSavedMsg(''), 2000);
   }, [
     profile, onUpdateProfile, weight, targetWeight, calorieTarget,
-    proteinTarget, carbTarget, fatTarget, sleepTarget, workoutTarget, waterTarget,
+    proteinTarget, carbTarget, fatTarget, fibreTarget, sleepTarget, workoutTarget, waterTarget,
   ]);
 
   // ── Add / Save Custom Food ──────────────────────────────────────────────
@@ -955,11 +968,15 @@ export default function Settings({
         </FieldRow>
         <FieldRow>
           <LabeledInput
+            label="Fibre Target (g)"
+            value={fibreTarget}
+            onChangeText={setFibreTarget}
+          />
+          <LabeledInput
             label="Water Target (ml)"
             value={waterTarget}
             onChangeText={setWaterTarget}
           />
-          <View style={{ flex: 1 }} />
         </FieldRow>
 
         <TouchableOpacity style={styles.primaryButton} onPress={handleSaveGoals} activeOpacity={0.8}>
@@ -1297,13 +1314,23 @@ export default function Settings({
         {(notificationSettings.customRules || []).map(rule => {
           const metricDef = CUSTOM_RULE_METRICS.find(m => m.key === rule.metric);
           const opDef = CUSTOM_RULE_OPERATORS.find(o => o.key === rule.operator);
+          // Old rules saved before frequency/weekday existed simply won't
+          // have them -- default to Daily here for display, exactly the
+          // same default the scheduler itself falls back to, so an old
+          // rule's card and its actual behavior always agree.
+          const frequency = rule.frequency || 'daily';
+          const weekdayLabel = WEEKDAYS.find(d => d.key === (rule.weekday ?? 0))?.label;
           return (
             <View key={rule.id} style={styles.ruleCard}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.ruleCardText}>
                   If <Text style={styles.ruleCardBold}>{metricDef?.label || rule.metric}</Text> {opDef?.label || rule.operator} <Text style={styles.ruleCardBold}>{rule.threshold}{metricDef?.unit ? ` ${metricDef.unit}` : ''}</Text>
                 </Text>
-                <Text style={styles.ruleCardMeta}>Checked around {String(rule.hour).padStart(2,'0')}:{String(rule.minute).padStart(2,'0')}</Text>
+                <Text style={styles.ruleCardMeta}>
+                  {frequency === 'weekly' ? `Weekly · ${weekdayLabel} ` : 'Daily · '}
+                  around {String(rule.hour).padStart(2,'0')}:{String(rule.minute).padStart(2,'0')}
+                </Text>
+                {rule.message ? <Text style={styles.ruleCardMessage}>💬 "{rule.message}"</Text> : null}
               </View>
               <TouchableOpacity style={[styles.toggle, rule.enabled && styles.toggleOn]} onPress={() => handleToggleCustomRule(rule.id)}>
                 <View style={[styles.toggleKnob, rule.enabled && styles.toggleKnobOn]} />
@@ -1317,13 +1344,18 @@ export default function Settings({
 
         <View style={styles.ruleForm}>
           <Text style={styles.inputLabel}>Metric</Text>
-          <View style={styles.chipRow}>
-            {CUSTOM_RULE_METRICS.map(m => (
-              <TouchableOpacity key={m.key} style={[styles.chip, ruleMetric === m.key && styles.chipActive]} onPress={() => setRuleMetric(m.key)}>
-                <Text style={[styles.chipText, ruleMetric === m.key && styles.chipTextActive]}>{m.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          {['Nutrition', 'Recovery / Health', 'Training'].map(group => (
+            <View key={group} style={{ marginBottom: 4 }}>
+              <Text style={styles.chipGroupLabel}>{group}</Text>
+              <View style={styles.chipRow}>
+                {CUSTOM_RULE_METRICS.filter(m => m.group === group).map(m => (
+                  <TouchableOpacity key={m.key} style={[styles.chip, ruleMetric === m.key && styles.chipActive]} onPress={() => setRuleMetric(m.key)}>
+                    <Text style={[styles.chipText, ruleMetric === m.key && styles.chipTextActive]}>{m.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          ))}
 
           <Text style={styles.inputLabel}>Condition</Text>
           <View style={styles.chipRow}>
@@ -1344,8 +1376,39 @@ export default function Settings({
             keyboardType="numeric"
           />
 
+          <Text style={styles.inputLabel}>Message (optional)</Text>
+          <ClearableTextInput
+            style={[styles.input, styles.fullInput]}
+            value={ruleMessage}
+            onChangeText={setRuleMessage}
+            placeholder="e.g. Don't forget your greens today!"
+            placeholderTextColor={C.muted2}
+          />
+
+          <Text style={styles.inputLabel}>Frequency</Text>
+          <View style={styles.chipRow}>
+            {CUSTOM_RULE_FREQUENCIES.map(f => (
+              <TouchableOpacity key={f.key} style={[styles.chip, ruleFrequency === f.key && styles.chipActive]} onPress={() => setRuleFrequency(f.key)}>
+                <Text style={[styles.chipText, ruleFrequency === f.key && styles.chipTextActive]}>{f.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {ruleFrequency === 'weekly' && (
+            <>
+              <Text style={styles.inputLabel}>Day</Text>
+              <View style={styles.chipRow}>
+                {WEEKDAYS.map(d => (
+                  <TouchableOpacity key={d.key} style={[styles.chip, ruleWeekday === d.key && styles.chipActive]} onPress={() => setRuleWeekday(d.key)}>
+                    <Text style={[styles.chipText, ruleWeekday === d.key && styles.chipTextActive]}>{d.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          )}
+
           <TimePickerField
-            label="Check time"
+            label="Time"
             hour={ruleHour}
             minute={ruleMinute}
             onChange={(h, m) => { setRuleHour(h); setRuleMinute(m); }}
@@ -1546,12 +1609,14 @@ const styles = StyleSheet.create({
   ruleCardText: { color: C.muted, fontSize: 12, lineHeight: 17 },
   ruleCardBold: { color: C.text, fontWeight: '700' },
   ruleCardMeta: { color: C.muted2, fontSize: 10, marginTop: 4 },
+  ruleCardMessage: { color: C.muted, fontSize: 11, marginTop: 4, fontStyle: 'italic' },
   ruleForm: { marginTop: 14, padding: 12, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.02)', borderWidth: 1, borderColor: C.border },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 },
   chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, borderWidth: 1, borderColor: C.border2, backgroundColor: 'rgba(255,255,255,0.04)' },
   chipActive: { borderColor: C.primary, backgroundColor: 'rgba(139,92,246,0.16)' },
   chipText: { color: C.muted, fontSize: 12, fontWeight: '600' },
   chipTextActive: { color: C.text },
+  chipGroupLabel: { color: C.muted2, fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 6, marginTop: 4 },
   timePickerButton:{backgroundColor:'rgba(255,255,255,0.05)',borderWidth:1,borderColor:C.border2,borderRadius:10,paddingHorizontal:12,paddingVertical:11,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}, timePickerText:{color:C.text,fontSize:14,fontWeight:'700'}, timePickerChevron:{color:C.muted,fontSize:24,lineHeight:20}, timeModalOverlay:{flex:1,backgroundColor:'rgba(0,0,0,0.65)',justifyContent:'center',alignItems:'center',padding:24}, timeModalCard:{width:'100%',maxWidth:360,backgroundColor:C.card,borderRadius:20,borderWidth:1,borderColor:C.border,padding:18,alignItems:'center'}, timeModalActions:{width:'100%',flexDirection:'row',gap:10,marginTop:12}, timeModalActionsButton:{flex:1},
   container: {
     flex: 1,

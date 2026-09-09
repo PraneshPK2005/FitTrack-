@@ -310,6 +310,21 @@ export default function Nutrition({ profile, foodLogs, customFoods, onAddFoodLog
     (foodLogs||[]).filter(l => l.date && l.date.slice(0,10) === selectedDate),
     [foodLogs, selectedDate]);
 
+  // Resolves the target configuration that was actually effective on
+  // selectedDate (Change 9) -- for "today" this naturally equals the live
+  // profile (editing a target creates a version effective today), so
+  // nothing changes for the current-day view; for any earlier date this
+  // correctly shows/uses whatever targets were active back then, even
+  // after Settings has since changed. Starts from `profile` as a same-
+  // render-cycle fallback so there's no flash of wrong values while the
+  // async resolution for a newly-selected date is still in flight.
+  const [dateTargets, setDateTargets] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    database.getTargetForDate(selectedDate).then(t => { if (!cancelled) setDateTargets(t); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedDate, profile]);
+
   const totals = useMemo(() =>
     selectedLogs.reduce((a, l) => ({
       calories: a.calories + (Number(l.calories)||0),
@@ -320,11 +335,11 @@ export default function Nutrition({ profile, foodLogs, customFoods, onAddFoodLog
     }), { calories: 0, protein: 0, carbs: 0, fats: 0, fibre: 0 }),
     [selectedLogs]);
 
-  const cT    = profile?.calorieTarget || 2300;
-  const pT    = profile?.proteinTarget || 140;
-  const carbT = profile?.carbTarget    || 250;
-  const fT    = profile?.fatTarget     || 70;
-  const fibreT = profile?.fibreTarget  || 30;
+  const cT    = dateTargets?.calorieTarget ?? profile?.calorieTarget ?? 2300;
+  const pT    = dateTargets?.proteinTarget ?? profile?.proteinTarget ?? 140;
+  const carbT = dateTargets?.carbTarget    ?? profile?.carbTarget    ?? 250;
+  const fT    = dateTargets?.fatTarget     ?? profile?.fatTarget     ?? 70;
+  const fibreT = dateTargets?.fibreTarget  ?? profile?.fibreTarget   ?? 30;
 
   // ── FIX: normalise custom food fields before passing to searchFood ─────────
   // Settings saves custom foods with field `fat` but scaleMacros expects `fats`.

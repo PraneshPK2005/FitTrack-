@@ -446,9 +446,31 @@ const styles = StyleSheet.create({
 });
 
 // Exercise-specific progression view used by Workout History.
-export const ExerciseProgression = ({ logs = [], exerciseName }) => {
+// Normalizes an equipment/machine label purely for GROUPING purposes so
+// trivial differences ("machine 1" vs "Machine 1" vs "Machine 1 " with a
+// trailing space) collapse into the same progression, while genuinely
+// different names ("Normal", "Machine 1", "Machine 2") never merge. Only
+// used to decide which logs belong together -- display always uses the
+// first-seen original label, not this normalized form.
+function normalizeEquipmentKey(equipment) {
+  return String(equipment || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+// A single exercise's progression, exactly the original ExerciseProgression
+// implementation, scoped to one specific equipment value via `equipment`
+// (undefined = every log for this exercise, regardless of equipment --
+// this is the exact pre-existing/legacy behavior, unchanged). `equipmentLabel`
+// is purely cosmetic, appended to the heading when this chart is one of
+// several for the same exercise.
+const SingleExerciseProgression = ({ logs = [], exerciseName, equipment, equipmentLabel, compact = false }) => {
   const [range, setRange] = useState('all');
-  const all = React.useMemo(() => getExerciseProgress(logs, exerciseName), [logs, exerciseName]);
+  // getExerciseProgress's optional 3rd (equipment) param scopes both the
+  // rows AND all bestWeight/bestRepsAtWeight/bestVolume/best1RM figures to
+  // logs on that same machine only (see progression.js) -- so every metric
+  // this component already showed (weight/volume/reps/1RM progression,
+  // PR/best-weight, best reps) is automatically machine-scoped for free,
+  // with zero separate "don't mix machines" logic needed here.
+  const all = React.useMemo(() => getExerciseProgress(logs, exerciseName, equipment), [logs, exerciseName, equipment]);
   const cutoff = range === '7' ? 7 : range === '30' ? 30 : range === '90' ? 90 : Infinity;
   const now = new Date();
   const rows = React.useMemo(() => all.rows.filter(r => {
@@ -542,9 +564,15 @@ export const ExerciseProgression = ({ logs = [], exerciseName }) => {
   };
 
   return (
-    <View style={styles.progressionCard}>
+    <View style={[styles.progressionCard, compact && styles.progressionCardCompact]}>
       <View style={styles.progressHeader}>
-        <Text style={styles.progressHeading}>📈 Progress — {exerciseName}</Text>
+        {compact ? (
+          <View style={styles.machineBadge}>
+            <Text style={styles.machineBadgeText}>🔧 {equipmentLabel}</Text>
+          </View>
+        ) : (
+          <Text style={styles.progressHeading}>📈 Progress — {exerciseName}{equipmentLabel ? ` — ${equipmentLabel}` : ''}</Text>
+        )}
         <View style={styles.rangeRow}>
           {['7', '30', '90', 'all'].map(r => (
             <TouchableOpacity key={r} onPress={() => setRange(r)} style={[styles.rangeBtn, range === r && styles.rangeBtnActive]}>
@@ -577,7 +605,73 @@ export const ExerciseProgression = ({ logs = [], exerciseName }) => {
   );
 };
 
+// Public component (same name/props as before -- no call-site changes
+// needed in Workouts.js). Splits `logs` for this exerciseName by their
+// equipment tag (Change 17-20): with zero or one equipment value present
+// (every pre-existing log, and any exercise nobody has tagged with a
+// machine) this renders exactly ONE chart, byte-for-byte the same as the
+// original single-chart component -- no visual change for existing data.
+// Only when 2+ distinct machines exist for this exercise does it render
+// one independent chart per machine, each fully scoped (weight/volume/
+// reps/1RM/PR) to that machine's own logs via getExerciseProgress's
+// equipment param, so machines are never compared against each other.
+export const ExerciseProgression = ({ logs = [], exerciseName }) => {
+  const equipmentGroups = React.useMemo(() => {
+    const relevant = (logs || []).filter(l => l.exerciseName === exerciseName);
+    const seen = new Map(); // normalized key -> first-seen original label
+    relevant.forEach(l => {
+      const key = normalizeEquipmentKey(l.equipment);
+      if (!seen.has(key)) seen.set(key, (l.equipment || '').trim());
+    });
+    return [...seen.entries()]; // [ [normalizedKey, displayLabel], ... ]
+  }, [logs, exerciseName]);
+
+  if (equipmentGroups.length <= 1) {
+    // 0 or 1 equipment value across all logs for this exercise -- legacy/
+    // simple case, single unlabeled chart exactly as before.
+    return <SingleExerciseProgression logs={logs} exerciseName={exerciseName} />;
+  }
+
+  // 2+ machines: one shared heading, then each machine's chart set side by
+  // side in a horizontally-scrollable row (labeled by machine name via the
+  // compact badge) instead of each repeating the full "Progress — Exercise
+  // — Machine" heading as its own stacked section.
+  return (
+    <View style={styles.progressionMultiWrap}>
+      <Text style={styles.progressHeading}>📈 Progress — {exerciseName}</Text>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={equipmentGroups.length > 1}
+        nestedScrollEnabled
+        contentContainerStyle={styles.progressionRow}
+      >
+        {equipmentGroups.map(([key, label]) => (
+          <View key={key || '_unspecified'} style={styles.progressionColumn}>
+            <SingleExerciseProgression
+              logs={logs}
+              exerciseName={exerciseName}
+              equipment={label}
+              equipmentLabel={label || 'Unspecified'}
+              compact
+            />
+          </View>
+        ))}
+      </ScrollView>
+    </View>
+  );
+};
+
 const _oldStyles = styles;
 Object.assign(styles, {
+  progressionMultiWrap: { marginBottom: 12 },
+  progressionRow: { flexDirection: 'row', gap: 10, paddingRight: 10 },
+  // Fixed width per machine column so several sit predictably side by
+  // side in the horizontal scroll row, rather than each stretching to fit
+  // its own (data-dependent) inner chart width.
+  progressionColumn: { width: 300 },
+  progressionCardCompact: { marginBottom: 0, width: '100%' },
+  machineBadge: { backgroundColor: 'rgba(124,92,252,0.16)', borderWidth: 1, borderColor: 'rgba(124,92,252,0.35)', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, alignSelf: 'flex-start', marginBottom: 8 },
+  machineBadgeText: { color: '#c4b5fd', fontSize: 11, fontWeight: '800' },
+
   progressionCard:{backgroundColor:'#0f0f1e',borderRadius:14,padding:12,borderWidth:1,borderColor:'rgba(255,255,255,0.08)',marginBottom:12},progressHeader:{marginBottom:8},progressHeading:{color:'#fff',fontSize:13,fontWeight:'800',marginBottom:8},rangeRow:{flexDirection:'row',gap:5},rangeBtn:{paddingHorizontal:8,paddingVertical:5,borderRadius:8,backgroundColor:'rgba(255,255,255,0.05)'},rangeBtnActive:{backgroundColor:'#7c5cfc'},rangeText:{color:'#fff',fontSize:9,fontWeight:'700'},progressChart:{marginTop:8},progressTitle:{color:'#94a3b8',fontSize:10,fontWeight:'700',marginBottom:5},progressLineSegment:{position:'absolute',height:2,backgroundColor:'#7c5cfc',transformOrigin:'left center'},progressPointWrap:{position:'absolute',width:8,height:8,borderRadius:4,alignItems:'center',justifyContent:'center'},progressPoint:{width:7,height:7,borderRadius:4,backgroundColor:'#7c5cfc',borderWidth:1,borderColor:'#0f0f1e'},progressPointBest:{backgroundColor:'#10b981'},progressPointLabel:{position:'absolute',width:48,alignItems:'center'},lineGridTop:{position:'absolute',left:0,right:0,top:12,borderTopWidth:1,borderTopColor:'rgba(255,255,255,0.05)'},lineGridMid:{position:'absolute',left:0,right:0,top:62,borderTopWidth:1,borderTopColor:'rgba(255,255,255,0.05)'},lineGridBottom:{position:'absolute',left:0,right:0,top:112,borderTopWidth:1,borderTopColor:'rgba(255,255,255,0.05)'},progressVal:{color:'#94a3b8',fontSize:7,marginTop:2},progressDate:{color:'#64748b',fontSize:7},progressStats:{marginTop:10,paddingTop:8,borderTopWidth:1,borderTopColor:'rgba(255,255,255,0.08)',gap:3},progressStat:{color:'#94a3b8',fontSize:10},emptyHint:{color:'#64748b',fontSize:10,textAlign:'center',marginTop:6}
 });

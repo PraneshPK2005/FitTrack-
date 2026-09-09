@@ -6,6 +6,8 @@
  * continue using the existing ai-engine.js unchanged.
  */
 
+import { formatSleepHours } from './database';
+
 function number(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -143,10 +145,10 @@ export function getFAQAnswer(id, context = {}) {
 
     case 'sleep': {
       if (!sleep) {
-        return `You have **no sleep record logged for today yet**. Your current sleep target is **${sleepTarget} hours/night**.\n\nFor most adults, **7–9 hours** per night is a useful general range, especially when training.`;
+        return `You have **no sleep record logged for today yet**. Your current sleep target is **${formatSleepHours(sleepTarget)}/night**.\n\nFor most adults, **7–9 hours** per night is a useful general range, especially when training.`;
       }
       const duration = number(sleep.duration);
-      return `Your sleep logged for today is **${duration !== null ? duration : '—'} hours**.\n\nYour FitTrack sleep target is **${sleepTarget} hours**.\n\n${duration !== null && duration >= sleepTarget ? '✅ You have reached your current sleep target.' : duration !== null ? `You are about **${Math.max(0, sleepTarget - duration).toFixed(1)} hours** below your current target.` : 'Keep logging your sleep to track it accurately.'}`;
+      return `Your sleep logged for today is **${duration !== null ? formatSleepHours(duration) : '—'}**.\n\nYour FitTrack sleep target is **${formatSleepHours(sleepTarget)}**.\n\n${duration !== null && duration >= sleepTarget ? '✅ You have reached your current sleep target.' : duration !== null ? `You are about **${formatSleepHours(Math.max(0, sleepTarget - duration))}** below your current target.` : 'Keep logging your sleep to track it accurately.'}`;
     }
 
     case 'water': {

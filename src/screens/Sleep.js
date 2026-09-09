@@ -5,6 +5,7 @@ import {
   TextInput, StyleSheet, Platform, Alert, Modal,
 } from 'react-native';
 import ClearableTextInput from '../components/ClearableTextInput';
+import { formatSleepHours } from '../utils/database';
 
 function localDate(n = 0) {
   const d = new Date();
@@ -30,10 +31,7 @@ function calcDuration(bedtime, wakeTime) {
 
 function formatDuration(hours) {
   if (hours === null || hours === undefined) return '—';
-  const h = Math.floor(hours);
-  const m = Math.round((hours - h) * 60);
-  if (m === 0) return `${h}h`;
-  return `${h}h ${m}m`;
+  return formatSleepHours(hours);
 }
 
 function qualityLabel(duration, sleepType) {

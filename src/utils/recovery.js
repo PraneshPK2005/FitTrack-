@@ -1,3 +1,5 @@
+import { formatSleepHours } from './database';
+
 function dayKey(d = new Date()) { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`; }
 // asOf lets the window be anchored to any reference date, not just the real
 // "now". This is what makes calculateRecovery usable for historical dates:
@@ -46,7 +48,7 @@ export function calculateRecovery({ profile = {}, sleepLogs = [], foodLogs = [],
   if (workouts3.length > 0) weighted.push([trainingScore,10]);
   const score = Math.round(weighted.reduce((a,[v,w])=>a+v*w,0)/weighted.reduce((a,[v,w])=>a+w,0));
   const reasons=[];
-  if (sleepScore !== null) reasons.push(sleepScore >= 100 ? 'Sleep met your target.' : `Sleep averaged ${(sleepAvg.reduce((a,b)=>a+b,0)/sleepAvg.length).toFixed(1)}h against your ${targetSleep}h target.`);
+  if (sleepScore !== null) reasons.push(sleepScore >= 100 ? 'Sleep met your target.' : `Sleep averaged ${formatSleepHours(sleepAvg.reduce((a,b)=>a+b,0)/sleepAvg.length)} against your ${formatSleepHours(targetSleep)} target.`);
   if (proteinScore !== null) reasons.push(proteinScore >= 100 ? 'Protein target was met.' : `Protein was ${Math.round(todayFood.protein)}g against your ${targetProtein}g target.`);
   if (fibreScore !== null) reasons.push(fibreScore >= 100 ? 'Fibre target was met.' : `Fibre was ${Math.round(todayFood.fibre)}g against your ${targetFibre}g target.`);
   if (waterScore !== null) reasons.push(waterScore >= 100 ? 'Water target was met.' : `Water was ${Math.round(waterByDay[0])}ml against your ${targetWater}ml target.`);

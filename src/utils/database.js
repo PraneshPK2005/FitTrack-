@@ -39,7 +39,21 @@ const KEYS = {
   // score only gets written here the first time it's actually requested
   // (see getOrCalculateRecoveryForDate below), never as a bulk migration.
   recoveryScores: 'fittrack_recovery_scores',
+  // Versioned history of target/goal configurations, keyed by effective
+  // date -- see getTargetForDate() below. This is the single source of
+  // truth for "what target applied on date X", separate from `profile`
+  // (which always holds the CURRENT/live targets, used for Settings display
+  // and any other current-state-only usage).
+  targetHistory: 'fittrack_target_history',
 };
+
+// Every field that participates in target-history versioning. Kept as one
+// list so every place that needs to compare/copy target fields (saveProfile,
+// migration, resolveTargetForDate) stays in sync automatically.
+export const TARGET_FIELDS = [
+  'calorieTarget', 'proteinTarget', 'carbTarget', 'fatTarget', 'fibreTarget',
+  'sleepTarget', 'workoutTarget', 'waterTargetMl',
+];
 
 // In-memory cache for parsed local data. This avoids repeatedly reading and
 // JSON-parsing the same large log collections during a single app session.
@@ -66,6 +80,22 @@ export function getFormattedDate(date) {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+// Single shared sleep-duration formatter -- every page that displays a
+// sleep duration or sleep target (Dashboard, Recovery, Sleep page, Charts,
+// weekly reports, AI Coach, notifications) should import and use this
+// rather than formatting decimal hours independently, so the display is
+// consistent everywhere without duplicating rounding logic per page.
+// Examples: 6.0 -> "6h", 6.25 -> "6h 15min", 6.33 -> "6h 20min",
+// 7.5 -> "7h 30min". Never shows a redundant "0min".
+export function formatSleepHours(decimalHours) {
+  const h = Number(decimalHours);
+  if (!Number.isFinite(h) || h < 0) return '0h';
+  const totalMinutes = Math.round(h * 60);
+  const hh = Math.floor(totalMinutes / 60);
+  const mm = totalMinutes % 60;
+  return mm === 0 ? `${hh}h` : `${hh}h ${mm}min`;
 }
 
 export function getDateNDaysAgo(n) {
@@ -190,9 +220,127 @@ function generateSeedData() {
 }
 
 // =============================================================
+// Target History (versioned targets — see TARGET_FIELDS above)
+// =============================================================
+// Sentinel effective date used only for the very first, migrated version so
+// it safely covers ALL pre-existing historical data without needing to scan
+// every log for the earliest date. Any real log will always be >= this.
+const TARGET_HISTORY_EPOCH = '2000-01-01';
+
+async function getRawTargetHistory() {
+  return getJSON(KEYS.targetHistory, []);
+}
+
+// Auto-migrates existing installs the first time target history is needed:
+// treats the current profile's targets as the initial version, effective
+// from TARGET_HISTORY_EPOCH so every already-logged date resolves to it.
+// Idempotent -- once a history array exists (even with one entry) this is a
+// no-op, so it never runs twice or duplicates the seed version.
+async function ensureTargetHistory() {
+  let history = await getRawTargetHistory();
+  if (history.length === 0) {
+    const profile = await getJSON(KEYS.profile, DEFAULT_PROFILE);
+    const seed = { effectiveDate: TARGET_HISTORY_EPOCH };
+    TARGET_FIELDS.forEach(f => { seed[f] = profile[f]; });
+    history = [seed];
+    await setJSON(KEYS.targetHistory, history);
+  }
+  return history;
+}
+
+// Creates (or updates, if one already exists for today) the target-history
+// version effective from today, using the fields on `profile` that are
+// about to be saved. Only ever called from saveProfile() once it has
+// already confirmed a target field actually changed.
+async function recordTargetVersion(profile) {
+  const history = await ensureTargetHistory();
+  const today = getFormattedDate(new Date());
+  const version = { effectiveDate: today };
+  TARGET_FIELDS.forEach(f => { version[f] = profile[f]; });
+  const idx = history.findIndex(v => v.effectiveDate === today);
+  // Multiple edits on the same day update that same day's version in place
+  // rather than stacking near-duplicate versions for one calendar date.
+  const next = idx >= 0
+    ? history.map((v, i) => i === idx ? version : v)
+    : [...history, version];
+  return setJSON(KEYS.targetHistory, next);
+}
+
+// Pure, synchronous resolver -- usable by any module that has already
+// loaded a target-history array (e.g. weekly-report.js, recovery
+// calculations) without needing its own storage round-trip per date.
+// targetForDate = the version whose effectiveDate is the latest
+// effectiveDate <= the given date (never a version from AFTER that date).
+export function resolveTargetForDate(history, dateStr, fallbackProfile = DEFAULT_PROFILE) {
+  const d = String(dateStr || '').slice(0, 10);
+  const sorted = [...(history || [])].sort((a, b) => String(a.effectiveDate).localeCompare(String(b.effectiveDate)));
+  let match = null;
+  for (const v of sorted) {
+    if (String(v.effectiveDate).slice(0, 10) <= d) match = v;
+    else break;
+  }
+  // No version old enough to apply (shouldn't happen once migrated, since
+  // TARGET_HISTORY_EPOCH predates any real data) -- fall back to the
+  // earliest known version, then the live profile, so a date is never left
+  // without SOME reasonable target rather than crashing/showing nothing.
+  if (!match) match = sorted[0] || null;
+  const base = match || fallbackProfile || DEFAULT_PROFILE;
+  const result = {};
+  TARGET_FIELDS.forEach(f => { result[f] = base[f] ?? DEFAULT_PROFILE[f]; });
+  return result;
+}
+
+// =============================================================
+// Recovery score invalidation
+// =============================================================
+// calculateRecovery() (utils/recovery.js) looks back a 3-day window ending
+// on the date it's computing for. So a change to sleep/food/water/workout
+// data on date D can affect the STORED score for D itself, AND for D+1 and
+// D+2 (since their own 3-day windows both include D). This clears exactly
+// those 1-3 stored entries -- never a wider range, and never every date --
+// so the fix stays cheap regardless of how much history exists.
+//
+// Deliberately does NOT recalculate anything here. Clearing the cache is
+// O(1); the actual calculateRecovery() work only ever happens lazily, the
+// next time that specific date is actually viewed (Dashboard's RecoveryCard
+// already does this via its stored-vs-signature check). This is what keeps
+// the whole mechanism battery/performance-cheap: every log edit costs one
+// tiny object write, never a recomputation, and a date that's never looked
+// at again is never recalculated at all.
+async function invalidateRecoveryFrom(dateStr) {
+  if (!dateStr) return;
+  const rows = await getJSON(KEYS.recoveryScores, {});
+  const base = new Date(String(dateStr).slice(0, 10) + 'T00:00:00');
+  let changed = false;
+  const next = { ...rows };
+  for (let i = 0; i < 3; i++) {
+    const d = new Date(base);
+    d.setDate(d.getDate() + i);
+    const key = getFormattedDate(d);
+    if (next[key]) { delete next[key]; changed = true; }
+  }
+  if (changed) await setJSON(KEYS.recoveryScores, next);
+}
+
+// =============================================================
 // Public API
 // =============================================================
 export const database = {
+  // Returns the full versioned target history (auto-migrating on first
+  // call for pre-existing installs). Callers that need to resolve targets
+  // for MANY dates at once (weekly reports, charts) should call this once
+  // and reuse resolveTargetForDate(history, date) themselves rather than
+  // calling getTargetForDate() per date.
+  async getTargetHistory() {
+    return ensureTargetHistory();
+  },
+  // Convenience for resolving a single date's target -- internally does
+  // the same getRawTargetHistory + resolveTargetForDate as above.
+  async getTargetForDate(dateStr) {
+    const history = await ensureTargetHistory();
+    const profile = await getJSON(KEYS.profile, DEFAULT_PROFILE);
+    return resolveTargetForDate(history, dateStr, profile);
+  },
   async checkAndSeedData() {
     const seeded = await getJSON(KEYS.seeded, false);
     if (seeded) return;
@@ -213,7 +361,18 @@ export const database = {
 
   // ── Profile ──────────────────────────────────────────────────
   async getProfile()   { return getJSON(KEYS.profile, DEFAULT_PROFILE); },
-  async saveProfile(p) { return setJSON(KEYS.profile, p); },
+  // Versions the target-affecting fields (see TARGET_FIELDS) whenever they
+  // actually change, BEFORE writing the new profile -- this is the single
+  // choke point every caller (Settings' Save Goals, any other profile
+  // update) already goes through, so target history stays correct
+  // regardless of where the change came from without duplicating this
+  // logic at each call site.
+  async saveProfile(p) {
+    const prev = await getJSON(KEYS.profile, DEFAULT_PROFILE);
+    const changed = TARGET_FIELDS.some(f => Number(prev[f]) !== Number(p[f]));
+    if (changed) await recordTargetVersion(p);
+    return setJSON(KEYS.profile, p);
+  },
 
   // ── Weight ───────────────────────────────────────────────────
   async getWeightLogs() {
@@ -259,6 +418,7 @@ export const database = {
       // Number(...)||0 pattern already used for calories/protein/carbs/fats.
       fibre:    Number(item.fibre)    || 0,
     });
+    await invalidateRecoveryFrom(date);
     return setJSON(KEYS.foodLogs, logs);
   },
   async updateFoodLog(id, fields) {
@@ -278,11 +438,14 @@ export const database = {
         // consistency and so a cleared/invalid input can't persist as NaN.
         fibre:    Number(fields.fibre    ?? logs[idx].fibre)    || 0,
       };
+      await invalidateRecoveryFrom(logs[idx].date);
     }
     return setJSON(KEYS.foodLogs, logs);
   },
   async deleteFoodLog(id) {
     const logs = await getJSON(KEYS.foodLogs, []);
+    const target = logs.find(l => l.id === id);
+    if (target) await invalidateRecoveryFrom(target.date);
     return setJSON(KEYS.foodLogs, logs.filter(l => l.id !== id));
   },
 
@@ -295,12 +458,16 @@ export const database = {
     const logs = await getJSON(KEYS.workoutLogs, []);
     const date = item.date || getFormattedDate(new Date());
     logs.push({ id: uid(), date, ...item });
+    await invalidateRecoveryFrom(date);
     return setJSON(KEYS.workoutLogs, logs);
   },
   async updateWorkoutLog(id, fields) {
     const logs = await getJSON(KEYS.workoutLogs, []);
     const idx = logs.findIndex(l => l.id === id);
-    if (idx >= 0) logs[idx] = { ...logs[idx], ...fields };
+    if (idx >= 0) {
+      logs[idx] = { ...logs[idx], ...fields };
+      await invalidateRecoveryFrom(logs[idx].date);
+    }
     return setJSON(KEYS.workoutLogs, logs);
   },
   async deleteWorkoutLog(id) {
@@ -321,6 +488,7 @@ export const database = {
         siblings.forEach((row, index) => { row.supersetOrder = index + 1; });
       }
     }
+    if (target) await invalidateRecoveryFrom(target.date);
     return setJSON(KEYS.workoutLogs, remaining);
   },
   // Bulk delete — used for "delete entire session" so removal happens as a
@@ -329,10 +497,14 @@ export const database = {
   async deleteWorkoutLogsByIds(ids) {
     const idSet = new Set(ids);
     const logs = await getJSON(KEYS.workoutLogs, []);
+    const dates = new Set(logs.filter(l => idSet.has(l.id)).map(l => l.date));
+    await Promise.all([...dates].map(d => invalidateRecoveryFrom(d)));
     return setJSON(KEYS.workoutLogs, logs.filter(l => !idSet.has(l.id)));
   },
   async deleteWorkoutLogsBySession(sessionId) {
     const logs = await getJSON(KEYS.workoutLogs, []);
+    const dates = new Set(logs.filter(l => l.sessionId === sessionId).map(l => l.date));
+    await Promise.all([...dates].map(d => invalidateRecoveryFrom(d)));
     return setJSON(KEYS.workoutLogs, logs.filter(l => l.sessionId !== sessionId));
   },
 
@@ -353,16 +525,22 @@ export const database = {
     } else {
       logs.push({ id: uid(), date, sleepType: 'nap', ...item });
     }
+    await invalidateRecoveryFrom(date);
     return setJSON(KEYS.sleepLogs, logs);
   },
   async updateSleepLog(id, fields) {
     const logs = await getJSON(KEYS.sleepLogs, []);
     const idx = logs.findIndex(l => l.id === id);
-    if (idx >= 0) logs[idx] = { ...logs[idx], ...fields };
+    if (idx >= 0) {
+      logs[idx] = { ...logs[idx], ...fields };
+      await invalidateRecoveryFrom(logs[idx].date);
+    }
     return setJSON(KEYS.sleepLogs, logs);
   },
   async deleteSleepLog(id) {
     const logs = await getJSON(KEYS.sleepLogs, []);
+    const target = logs.find(l => l.id === id);
+    if (target) await invalidateRecoveryFrom(target.date);
     return setJSON(KEYS.sleepLogs, logs.filter(l => l.id !== id));
   },
 
@@ -375,15 +553,22 @@ export const database = {
     const logs = await getJSON(KEYS.waterLogs, []);
     const date = item.date || getFormattedDate(new Date());
     logs.push({ id: uid(), date, amountMl: Number(item.amountMl) || 0, timestamp: item.timestamp || new Date().toISOString() });
+    await invalidateRecoveryFrom(date);
     return setJSON(KEYS.waterLogs, logs);
   },
   async updateWaterLog(id, fields) {
     const logs = await getJSON(KEYS.waterLogs, []); const idx = logs.findIndex(l => l.id === id);
-    if (idx >= 0) logs[idx] = { ...logs[idx], ...fields, amountMl: Number(fields.amountMl ?? logs[idx].amountMl) || 0 };
+    if (idx >= 0) {
+      logs[idx] = { ...logs[idx], ...fields, amountMl: Number(fields.amountMl ?? logs[idx].amountMl) || 0 };
+      await invalidateRecoveryFrom(logs[idx].date);
+    }
     return setJSON(KEYS.waterLogs, logs);
   },
   async deleteWaterLog(id) {
-    const logs = await getJSON(KEYS.waterLogs, []); return setJSON(KEYS.waterLogs, logs.filter(l => l.id !== id));
+    const logs = await getJSON(KEYS.waterLogs, []);
+    const target = logs.find(l => l.id === id);
+    if (target) await invalidateRecoveryFrom(target.date);
+    return setJSON(KEYS.waterLogs, logs.filter(l => l.id !== id));
   },
 
   // ── Progress Photos metadata (image files live in app filesystem) ───────
@@ -623,7 +808,7 @@ export const database = {
 
   // ── Backup / Restore ─────────────────────────────────────────
   async exportAllData() {
-    const [profile, weightLogs, foodLogs, workoutLogs, sleepLogs, customFoods, waterLogs, progressPhotos, progressPhotoCategories, notificationSettings, exerciseLibrary, workoutSessions, progressPhotoPinHash] =
+    const [profile, weightLogs, foodLogs, workoutLogs, sleepLogs, customFoods, waterLogs, progressPhotos, progressPhotoCategories, notificationSettings, exerciseLibrary, workoutSessions, progressPhotoPinHash, targetHistory] =
       await Promise.all([
         getJSON(KEYS.profile,     DEFAULT_PROFILE),
         getJSON(KEYS.weightLogs,  []),
@@ -638,11 +823,16 @@ export const database = {
         getJSON(KEYS.exerciseLibrary, []),
         getJSON(KEYS.workoutSessions, {}),
         this.getSetting('progressPhotoPinHash'),
+        ensureTargetHistory(),
       ]);
     return JSON.stringify({
-      __version: 3,
+      __version: 4,
       __exported: new Date().toISOString(),
       profile, weightLogs, foodLogs, workoutLogs, sleepLogs, customFoods, waterLogs, notificationSettings, exerciseLibrary, workoutSessions,
+      // Versioned target history (see TARGET_FIELDS/resolveTargetForDate) --
+      // needed so a restored backup keeps evaluating old dates against the
+      // targets that were actually active then, not just today's targets.
+      targetHistory,
       // Progress Photos: metadata + filesystem paths only — the actual
       // image bytes are never included here (see utils/progress-photos.js).
       // The password is never included in raw form, only its existing
@@ -676,6 +866,10 @@ export const database = {
       data.notificationSettings && setJSON(KEYS.notificationSettings, data.notificationSettings),
       data.exerciseLibrary && setJSON(KEYS.exerciseLibrary, data.exerciseLibrary),
       data.workoutSessions && setJSON(KEYS.workoutSessions, data.workoutSessions),
+      // Older backups (pre-Change 4) won't have this key -- ensureTargetHistory()
+      // will auto-migrate from the restored profile on first read, exactly as
+      // it does for any other pre-existing install. Never rejects the backup.
+      Array.isArray(data.targetHistory) && data.targetHistory.length && setJSON(KEYS.targetHistory, data.targetHistory),
       // Progress Photo metadata/paths + custom categories + password hash.
       // Only metadata is restored here — whether each photo's underlying
       // image file is actually present on this device is checked
